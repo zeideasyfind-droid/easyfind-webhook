@@ -6,7 +6,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// ===== SHEET CONFIG (VERIFIED) =====
+// ===== SHEET CONFIG =====
 const SPREADSHEET_ID = "1BbuD7HbL6Hct3VbAaomx890wKsvVUvtIb4j8QJ7SFo4";
 const SHEET_NAME = "Live Tracking";
 
@@ -33,6 +33,15 @@ function parseListing(text) {
   const bathrooms = t.match(/(\d+)\s*bath/)?.[1];
   const balcony = t.match(/(\d+)\s*balcon/)?.[1];
 
+  // NEW FIXES 👇
+  const availableFrom =
+    text.match(/available\s*from[:\s]*([^\n]+)/i)?.[1]?.trim() || "";
+
+  const society =
+    text.match(/\*\s*([^\n]+)\s*\*\s*https/i)?.[1]?.trim() || "";
+
+  const utility = t.includes("utility") ? "Yes" : "No";
+
   const location =
     text.match(/location[:\s]*\*?(.+)/i)?.[1]?.replace(/\*/g, "").trim() || "";
 
@@ -57,6 +66,9 @@ function parseListing(text) {
     balcony: balcony || "",
     furnishing,
     pets,
+    availableFrom,
+    society,
+    utility,
     raw: text,
   };
 }
@@ -68,8 +80,7 @@ function isDuplicate(d) {
   const key = `${d.bhk}-${d.rent}-${d.location}`;
 
   if (cache.has(key)) {
-    console.log("⚠️ Skipped duplicate-like listing");
-    console.log("DATA:", d.raw);
+    console.log("⚠️ Skipped duplicate");
     return true;
   }
 
@@ -80,7 +91,7 @@ function isDuplicate(d) {
 }
 
 // ===== PUSH TO SHEET =====
-async function pushToSheet(d) {
+async function pushToSheet(d, sender, messageId) {
   try {
     const now = new Date();
 
@@ -90,34 +101,34 @@ async function pushToSheet(d) {
       valueInputOption: "USER_ENTERED",
       requestBody: {
         values: [[
-          now.toLocaleString(),      // A PID (temporary timestamp)
-          "Online",                  // B Onboarding Type (VALID)
-          d.location,                // C Property Location
-          "Gated",                   // D Apartment Type (VALID)
-          "",                        // E Society Name
-          d.bhk,                     // F BHK (VALID dropdown)
-          d.bathrooms,               // G Bathrooms
-          d.balcony,                 // H Balcony
-          "",                        // I Utility
-          d.sqft,                    // J Size
-          d.floor,                   // K Floor
-          d.furnishing,              // L Furnishing (VALID)
-          "Open for All",            // M Clients Preferred (VALID)
-          "No Restriction",          // N Veg/NonVeg (VALID)
-          d.pets,                    // O Pets (VALID)
-          d.rent,                    // P Rent
-          d.maintenance,             // Q Maintenance
-          d.deposit,                 // R Deposit
-          "",                        // S Available From
-          "Open for negotiations",   // T Scope (VALID)
-          "",                        // U Visit Timing
-          "Available",               // V Availability (VALID)
-          now.toLocaleString(),      // W Date Added
-          now.toLocaleString(),      // X Last Updated
-          "",                        // Y Message ID (future)
-          "",                        // Z Sender Phone (future)
-          d.raw,                     // AA Raw Message
-          now.toISOString()          // AB Timestamp
+          now.toLocaleString(),   // A PID
+          "Online",               // B
+          d.location,             // C
+          "Gated",                // D
+          d.society,              // E ✅ FIXED
+          d.bhk,                  // F
+          d.bathrooms,            // G
+          d.balcony,              // H
+          d.utility,              // I ✅ FIXED
+          d.sqft,                 // J
+          d.floor,                // K
+          d.furnishing,           // L
+          "Open for All",         // M
+          "No Restriction",       // N
+          d.pets,                 // O
+          d.rent,                 // P
+          d.maintenance,          // Q
+          d.deposit,              // R
+          d.availableFrom,        // S ✅ FIXED
+          "Open for negotiations",// T
+          "",                     // U (no data yet)
+          "Available",            // V
+          now.toLocaleString(),   // W
+          now.toLocaleString(),   // X
+          messageId || "",        // Y ✅ FIXED
+          sender || "",           // Z ✅ FIXED
+          d.raw,                  // AA
+          now.toISOString()       // AB
         ]]
       }
     });
@@ -132,8 +143,11 @@ async function pushToSheet(d) {
 // ===== WEBHOOK =====
 app.post("/webhook", async (req, res) => {
   try {
-    const message =
-      req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.text?.body;
+    const msgObj = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+
+    const message = msgObj?.text?.body;
+    const sender = msgObj?.from;
+    const messageId = msgObj?.id;
 
     if (!message) return res.sendStatus(200);
 
@@ -142,7 +156,7 @@ app.post("/webhook", async (req, res) => {
     const data = parseListing(message);
 
     if (data && !isDuplicate(data)) {
-      await pushToSheet(data);
+      await pushToSheet(data, sender, messageId);
     } else {
       console.log("⚠️ Not enough data OR duplicate");
     }
@@ -152,6 +166,11 @@ app.post("/webhook", async (req, res) => {
   }
 
   res.sendStatus(200);
+});
+
+// OPTIONAL ROOT CHECK
+app.get("/", (req, res) => {
+  res.send("Webhook is live ✅");
 });
 
 // ===== START SERVER =====
