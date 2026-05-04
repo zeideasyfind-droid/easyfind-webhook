@@ -8,19 +8,6 @@ app.use(cors());
 
 const PORT = process.env.PORT || 10000;
 
-// ===== ENUMS =====
-const ENUMS = {
-  onboardingType: ["Online", "Offline Scouting", "Reference", "Broker Network", "Direct Owner"],
-  apartmentType: ["Gated", "Non-Gated"],
-  bhk: ["1 RK","1 BHK","1. 5 BHK","2 BHK","2.5 BHK","3 BHK","3.5 BHK","4 BHK","4.5 BHK","5 BHK","5 +"],
-  furnishing: ["Fully Furnished","Semi Furnished","Unfurnished","Semi or Fully"],
-  clientPreference: ["Family","Family & Bachelors Females","Family & Bachelors Males","Open for All","Hindu Family & Bachelors","Only Bachelors"],
-  foodPreference: ["Veg Only","No Restriction"],
-  pets: ["Yes","No"],
-  negotiation: ["Open for negotiations","Slight negotiations","Fixed"],
-  availability: ["Available","Delayed","Rented out"]
-};
-
 // ===== GOOGLE AUTH =====
 const auth = new google.auth.GoogleAuth({
   credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
@@ -36,16 +23,44 @@ function clean(val) {
   return val ? val.toString().trim() : "";
 }
 
-function validateEnum(field, value) {
-  if (value && !ENUMS[field].includes(clean(value))) {
-    throw new Error(`Invalid ${field}: ${value}`);
-  }
+// ===== DATE FORMATTER (DDMMYY) =====
+function getTodayKey() {
+  const now = new Date();
+  const day = String(now.getDate()).padStart(2, "0");
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const year = String(now.getFullYear()).slice(-2);
+  return `${day}${month}${year}`;
 }
 
-function validateNumber(field, value) {
-  if (value && isNaN(value)) {
-    throw new Error(`${field} must be a number`);
-  }
+// ===== PID GENERATOR =====
+async function generatePID() {
+  const todayKey = getTodayKey();
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "Live Tracking!A2:A",
+  });
+
+  const rows = response.data.values || [];
+
+  let maxSerial = 0;
+
+  rows.forEach(r => {
+    const pid = r[0];
+    if (!pid) return;
+
+    // match EF-DDMMYY-XXX
+    const match = pid.match(/^EF-(\d{6})-(\d{3})$/);
+
+    if (match && match[1] === todayKey) {
+      const serial = parseInt(match[2], 10);
+      if (serial > maxSerial) maxSerial = serial;
+    }
+  });
+
+  const nextSerial = String(maxSerial + 1).padStart(3, "0");
+
+  return `EF-${todayKey}-${nextSerial}`;
 }
 
 // ===== WEBHOOK =====
@@ -53,26 +68,13 @@ app.post("/webhook", async (req, res) => {
   try {
     const d = req.body;
 
-    // VALIDATIONS
-    validateEnum("onboardingType", d.onboardingType);
-    validateEnum("apartmentType", d.apartmentType);
-    validateEnum("bhk", d.bhk);
-    validateEnum("furnishing", d.furnishing);
-    validateEnum("clientPreference", d.clientPreference);
-    validateEnum("foodPreference", d.foodPreference);
-    validateEnum("pets", d.pets);
-    validateEnum("negotiation", d.negotiation);
-    validateEnum("availability", d.availability);
+    const now = new Date().toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+    });
 
-    ["bathrooms","balcony","utility","size","rent","maintenance","deposit"]
-      .forEach(f => validateNumber(f, d[f]));
+    // 🔥 NEW PID LOGIC
+    const PID = await generatePID();
 
-    // ===== SYSTEM VALUES =====
-    const now = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-
-    const PID = "PID-" + Date.now(); // unique ID
-
-    // ===== FINAL ROW =====
     const row = [
       PID,
       clean(d.onboardingType),
@@ -111,7 +113,7 @@ app.post("/webhook", async (req, res) => {
       requestBody: { values: [row] },
     });
 
-    res.send("Data added to sheet ✅");
+    res.send(`Data added with PID ${PID} ✅`);
 
   } catch (err) {
     console.error(err.message);
