@@ -8,7 +8,7 @@ app.use(cors());
 
 const PORT = process.env.PORT || 10000;
 
-// ===== ENUMS (MATCH YOUR SHEET EXACTLY) =====
+// ===== ENUMS =====
 const ENUMS = {
   onboardingType: ["Online", "Offline Scouting", "Reference", "Broker Network", "Direct Owner"],
   apartmentType: ["Gated", "Non-Gated"],
@@ -21,7 +21,7 @@ const ENUMS = {
   availability: ["Available","Delayed","Rented out"]
 };
 
-// ===== GOOGLE AUTH (IMPORTANT: ENV VARIABLE USED HERE) =====
+// ===== GOOGLE AUTH =====
 const auth = new google.auth.GoogleAuth({
   credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
@@ -54,7 +54,7 @@ app.post("/webhook", async (req, res) => {
   try {
     const d = req.body;
 
-    // ===== VALIDATIONS =====
+    // VALIDATIONS
     validateEnum("onboardingType", d.onboardingType);
     validateEnum("apartmentType", d.apartmentType);
     validateEnum("bhk", d.bhk);
@@ -68,9 +68,9 @@ app.post("/webhook", async (req, res) => {
     ["bathrooms","balcony","utility","size","rent","maintenance","deposit"]
       .forEach(f => validateNumber(f, d[f]));
 
-    // ===== FINAL ROW (A → AB EXACT ORDER) =====
+    // FINAL ROW (MATCH YOUR SHEET)
     const row = [
-      "", // PID handled by Apps Script
+      "", // PID
       clean(d.onboardingType),
       clean(d.location),
       clean(d.apartmentType),
@@ -92,8 +92,8 @@ app.post("/webhook", async (req, res) => {
       clean(d.negotiation),
       clean(d.visitTimings),
       clean(d.availability),
-      "", // Date Added (Apps Script)
-      "", // Last Updated (Apps Script)
+      "", // Date Added
+      "", // Last Updated
       clean(d.messageId),
       clean(d.senderPhone),
       clean(d.rawMessage),
@@ -102,7 +102,7 @@ app.post("/webhook", async (req, res) => {
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
-      range: "Sheet1!A:AB",
+      range: "Live Tracking!A:AB", // ✅ FIXED HERE
       valueInputOption: "RAW",
       requestBody: { values: [row] },
     });
@@ -115,12 +115,12 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ===== ROOT CHECK =====
+// ROOT
 app.get("/", (req, res) => {
   res.send("EasyFind Webhook is LIVE 🚀");
 });
 
-// ===== START SERVER =====
+// START
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
