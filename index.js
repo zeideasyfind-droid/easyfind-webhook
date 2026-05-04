@@ -29,7 +29,6 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: "v4", auth });
 
-// ===== YOUR SHEET ID =====
 const SPREADSHEET_ID = "1BbuD7HbL6Hct3VbAaomx890wKsvVUvtIb4j8QJ7SFo4";
 
 // ===== HELPERS =====
@@ -68,9 +67,14 @@ app.post("/webhook", async (req, res) => {
     ["bathrooms","balcony","utility","size","rent","maintenance","deposit"]
       .forEach(f => validateNumber(f, d[f]));
 
-    // FINAL ROW (MATCH YOUR SHEET)
+    // ===== SYSTEM VALUES =====
+    const now = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+
+    const PID = "PID-" + Date.now(); // unique ID
+
+    // ===== FINAL ROW =====
     const row = [
-      "", // PID
+      PID,
       clean(d.onboardingType),
       clean(d.location),
       clean(d.apartmentType),
@@ -92,17 +96,17 @@ app.post("/webhook", async (req, res) => {
       clean(d.negotiation),
       clean(d.visitTimings),
       clean(d.availability),
-      "", // Date Added
-      "", // Last Updated
-      clean(d.messageId),
-      clean(d.senderPhone),
-      clean(d.rawMessage),
-      clean(d.messageTimestamp)
+      now, // Date Added
+      now, // Last Updated
+      clean(d.messageId) || "manual",
+      clean(d.senderPhone) || "manual",
+      clean(d.rawMessage) || JSON.stringify(d),
+      clean(d.messageTimestamp) || now
     ];
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
-      range: "Live Tracking!A:AB", // ✅ FIXED HERE
+      range: "Live Tracking!A:AB",
       valueInputOption: "RAW",
       requestBody: { values: [row] },
     });
