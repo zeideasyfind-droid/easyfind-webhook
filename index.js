@@ -5,16 +5,15 @@ const { google } = require("googleapis");
 const app = express();
 app.use(bodyParser.json());
 
-const PORT = process.env.PORT || 10000;
-
 // ===== CONFIG =====
 const VERIFY_TOKEN = "easyfind_verify_token";
 const SPREADSHEET_ID = "1BbuD7HbL6Hct3VbAaomx890wKsvVUvtIb4j8QJ7SFo4";
 const SHEET_NAME = "Live Tracking";
+const PORT = process.env.PORT || 10000;
 
 // ===== GOOGLE AUTH =====
 const auth = new google.auth.GoogleAuth({
-  credentials: require("./service-account.json"),
+  credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 
@@ -34,18 +33,23 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// ===== CHECK DUPLICATE MESSAGE ID =====
+// ===== DUPLICATE CHECK =====
 async function isDuplicate(messageId) {
-  const response = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!Y:Y`,
-  });
+  try {
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!Y:Y`,
+    });
 
-  const rows = response.data.values || [];
-  return rows.some(row => row[0] === messageId);
+    const rows = response.data.values || [];
+    return rows.some((row) => row[0] === messageId);
+  } catch (err) {
+    console.log("Duplicate check error:", err.message);
+    return false;
+  }
 }
 
-// ===== WEBHOOK RECEIVE =====
+// ===== RECEIVE WEBHOOK =====
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
@@ -54,7 +58,7 @@ app.post("/webhook", async (req, res) => {
 
     const change = body.entry[0].changes[0].value;
 
-    // Ignore read/delivery updates
+    // Ignore delivery/read updates
     if (!change.messages) return res.sendStatus(200);
 
     const msg = change.messages[0];
@@ -64,16 +68,16 @@ app.post("/webhook", async (req, res) => {
     const text = msg.text ? msg.text.body : "";
     const timestamp = new Date(parseInt(msg.timestamp) * 1000).toISOString();
 
-    console.log("Incoming message:", text);
+    console.log("Incoming:", text);
 
-    // Duplicate check
+    // Duplicate protection
     const duplicate = await isDuplicate(messageId);
     if (duplicate) {
       console.log("Duplicate skipped");
       return res.sendStatus(200);
     }
 
-    // Write to sheet
+    // ===== WRITE TO SHEET (COLUMN Y ONWARDS) =====
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
       range: `${SHEET_NAME}!Y:AB`,
@@ -87,7 +91,7 @@ app.post("/webhook", async (req, res) => {
 
     res.sendStatus(200);
   } catch (error) {
-    console.error("Error:", error);
+    console.error("Error:", error.message);
     res.sendStatus(500);
   }
 });
