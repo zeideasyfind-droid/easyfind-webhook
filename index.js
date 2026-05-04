@@ -5,13 +5,16 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
-const VERIFY_TOKEN = "easyfind123";
 
-// ===============================
-// GOOGLE SHEETS SETUP
-// ===============================
+// ================= CONFIG =================
 
-const SHEET_ID = process.env.SHEET_ID;
+// ✅ YOUR ACTUAL SHEET ID (CONFIRMED)
+const SPREADSHEET_ID = "1BbuD7HbL6Hct3VbAaomx890wKsvVUvtIb4j8QJ7SFo4";
+
+// ✅ EXACT TAB NAME FROM YOUR SCREENSHOT
+const SHEET_NAME = "Live Tracking";
+
+// ================= GOOGLE AUTH =================
 
 const auth = new google.auth.GoogleAuth({
   credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
@@ -20,175 +23,119 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: "v4", auth });
 
-// ===============================
-// MEMORY
-// ===============================
+// ================= HELPERS =================
 
-let recentListings = [];
+function extractData(text) {
+  if (!text) return null;
 
-// ===============================
-// HELPERS
-// ===============================
+  const lower = text.toLowerCase();
 
-function generateKey(listing) {
-  return `${listing.bhk || ""}-${listing.rent || ""}-${listing.location || ""}`
-    .toLowerCase()
-    .trim();
+  const bhkMatch = lower.match(/(\d)\s*bhk/);
+  const rentMatch = lower.match(/(\d+)\s*k/);
+  const locationMatch = lower.match(
+    /(harlur|bellandur|hsr|sarjapur|marathahalli|whitefield)/
+  );
+
+  if (!bhkMatch || !rentMatch) return null;
+
+  return {
+    bhk: bhkMatch[1] + " BHK",
+    rent: parseInt(rentMatch[1]) * 1000,
+    location: locationMatch ? locationMatch[1] : "",
+    raw: text.trim(),
+  };
 }
 
-function isDuplicate(listing, rawMessage) {
-  const key = generateKey(listing);
+// ================= DUPLICATE CHECK =================
 
-  if (recentListings.includes(key)) {
+const recentCache = new Set();
+
+function isDuplicate(data) {
+  const key = `${data.bhk}-${data.rent}-${data.location}`;
+
+  if (recentCache.has(key)) {
     console.log("⚠️ Skipped duplicate-like listing");
-    console.log("DATA:", rawMessage);
+    console.log("DATA:", data.raw);
     return true;
   }
+
+  recentCache.add(key);
+
+  setTimeout(() => {
+    recentCache.delete(key);
+  }, 5 * 60 * 1000);
 
   return false;
 }
 
-function markAsSeen(listing) {
-  const key = generateKey(listing);
-  recentListings.push(key);
+// ================= SHEET PUSH =================
 
-  if (recentListings.length > 50) {
-    recentListings.shift();
-  }
-}
-
-// ===============================
-// PARSER (SMART + FLEXIBLE)
-// ===============================
-
-function parseMessage(text) {
-  const lower = text.toLowerCase();
-
-  const bhkMatch = text.match(/(\d+)\s*bhk/i);
-  const rentMatch = text.match(/(?:rent[:\s]*)?(\d+)\s*k/i);
-  const depositMatch = text.match(/(\d+(\.\d+)?)\s*l/i);
-  const sqftMatch = text.match(/(\d{3,5})\s*sqft/i);
-  const locationMatch = text.match(/location[:\s]*(.*)/i);
-
-  return {
-    bhk: bhkMatch ? `${bhkMatch[1]} BHK` : "",
-    rent: rentMatch ? Number(rentMatch[1]) * 1000 : "",
-    deposit: depositMatch ? Number(depositMatch[1]) * 100000 : "",
-    sqft: sqftMatch ? sqftMatch[1] : "",
-    location: locationMatch ? locationMatch[1].trim() : "",
-  };
-}
-
-// ===============================
-// PUSH TO SHEET
-// ===============================
-
-async function pushToSheet(listing, rawMessage, phone, messageId) {
+async function pushToSheet(data) {
   try {
-    if (!SHEET_ID) {
-      console.log("❌ SHEET_ID missing");
-      return false;
-    }
-
-    const row = [
-      `EF-${Date.now()}`, // PID
-      "WhatsApp", // Source
-      listing.location,
-      listing.bhk,
-      listing.rent,
-      listing.deposit,
-      listing.sqft,
-      rawMessage,
-      phone,
-      messageId,
-      new Date().toISOString(),
-    ];
-
     await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID,
-      range: "Sheet1!A1",
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A1`, // ✅ FIXED
       valueInputOption: "USER_ENTERED",
       requestBody: {
-        values: [row],
+        values: [
+          [
+            new Date().toLocaleString(),
+            data.bhk,
+            data.rent,
+            data.location,
+            data.raw,
+          ],
+        ],
       },
     });
 
-    console.log("✅ Added to sheet:", listing.bhk, listing.rent);
-    return true;
+    console.log("✅ Added to sheet");
   } catch (err) {
-    console.log("❌ Sheet Error:", err.message);
-    return false;
+    console.error("❌ Sheet Error:", err.message);
   }
 }
 
-// ===============================
-// VERIFY WEBHOOK
-// ===============================
-
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
-  } else {
-    return res.sendStatus(403);
-  }
-});
-
-// ===============================
-// MAIN WEBHOOK
-// ===============================
+// ================= WEBHOOK =================
 
 app.post("/webhook", async (req, res) => {
   try {
-    const body = req.body;
-
     const message =
-      body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+      req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.text?.body;
 
     if (!message) {
+      console.log("⚠️ No message body");
       return res.sendStatus(200);
     }
 
-    const text = message?.text?.body || "";
-    const from = message?.from || "";
-    const messageId = message?.id || "";
+    console.log("📩 Incoming:", message);
 
-    console.log("📩 Incoming:", text);
+    // Handle multiple lines / listings
+    const parts = message.split("\n");
 
-    const listing = parseMessage(text);
+    for (let part of parts) {
+      const data = extractData(part);
 
-    // basic validation (smart, not strict)
-    if (!listing.bhk && !listing.rent) {
-      console.log("⚠️ Not enough data, skipping");
-      return res.sendStatus(200);
-    }
-
-    if (!isDuplicate(listing, text)) {
-      const success = await pushToSheet(
-        listing,
-        text,
-        from,
-        messageId
-      );
-
-      if (success) {
-        markAsSeen(listing);
+      if (!data) {
+        console.log("⚠️ Not enough data, skipping");
+        continue;
       }
-    }
 
-    res.sendStatus(200);
+      if (isDuplicate(data)) continue;
+
+      await pushToSheet(data);
+    }
   } catch (err) {
-    console.error(err);
-    res.sendStatus(500);
+    console.error("Webhook Error:", err.message);
   }
+
+  res.sendStatus(200);
 });
 
-// ===============================
-// START SERVER
-// ===============================
+// ================= HEALTH CHECK =================
+
+app.get("/", (req, res) => {
+  res.send("Server is live");
+});
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
