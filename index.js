@@ -8,10 +8,7 @@ const PORT = process.env.PORT || 10000;
 
 // ================= CONFIG =================
 
-// ✅ YOUR ACTUAL SHEET ID (CONFIRMED)
 const SPREADSHEET_ID = "1BbuD7HbL6Hct3VbAaomx890wKsvVUvtIb4j8QJ7SFo4";
-
-// ✅ EXACT TAB NAME FROM YOUR SCREENSHOT
 const SHEET_NAME = "Live Tracking";
 
 // ================= GOOGLE AUTH =================
@@ -23,17 +20,18 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: "v4", auth });
 
-// ================= HELPERS =================
+// ================= SMART PARSER =================
 
-function extractData(text) {
+function parseListing(text) {
   if (!text) return null;
 
   const lower = text.toLowerCase();
 
-  const bhkMatch = lower.match(/(\d)\s*bhk/);
+  const bhkMatch = lower.match(/(\d+)\s*bhk/);
   const rentMatch = lower.match(/(\d+)\s*k/);
+
   const locationMatch = lower.match(
-    /(harlur|bellandur|hsr|sarjapur|marathahalli|whitefield)/
+    /(harlur|bellandur|hsr|koramangala|sarjapur|marathahalli|whitefield)/
   );
 
   if (!bhkMatch || !rentMatch) return null;
@@ -46,35 +44,34 @@ function extractData(text) {
   };
 }
 
-// ================= DUPLICATE CHECK =================
+// ================= DUPLICATE HANDLING =================
 
-const recentCache = new Set();
+const cache = new Set();
 
 function isDuplicate(data) {
   const key = `${data.bhk}-${data.rent}-${data.location}`;
 
-  if (recentCache.has(key)) {
+  if (cache.has(key)) {
     console.log("⚠️ Skipped duplicate-like listing");
     console.log("DATA:", data.raw);
     return true;
   }
 
-  recentCache.add(key);
+  cache.add(key);
 
-  setTimeout(() => {
-    recentCache.delete(key);
-  }, 5 * 60 * 1000);
+  // Auto clear after 5 mins
+  setTimeout(() => cache.delete(key), 5 * 60 * 1000);
 
   return false;
 }
 
-// ================= SHEET PUSH =================
+// ================= PUSH TO SHEET =================
 
 async function pushToSheet(data) {
   try {
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!A1`, // ✅ FIXED
+      range: `${SHEET_NAME}!A1`,
       valueInputOption: "USER_ENTERED",
       requestBody: {
         values: [
@@ -89,52 +86,62 @@ async function pushToSheet(data) {
       },
     });
 
-    console.log("✅ Added to sheet");
+    console.log("✅ Added:", data.raw);
   } catch (err) {
     console.error("❌ Sheet Error:", err.message);
   }
 }
 
-// ================= WEBHOOK =================
+// ================= CORE WEBHOOK =================
 
 app.post("/webhook", async (req, res) => {
   try {
     const message =
       req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.text?.body;
 
-    if (!message) {
-      console.log("⚠️ No message body");
+    if (!message) return res.sendStatus(200);
+
+    console.log("📩 Incoming FULL MESSAGE:\n", message);
+
+    // ✅ 1. Try full message directly
+    let data = parseListing(message);
+
+    if (data && !isDuplicate(data)) {
+      await pushToSheet(data);
       return res.sendStatus(200);
     }
 
-    console.log("📩 Incoming:", message);
+    // ✅ 2. Try smart line grouping
+    const lines = message.split("\n");
+    let buffer = "";
 
-    // Handle multiple lines / listings
-    const parts = message.split("\n");
+    for (let line of lines) {
+      buffer += " " + line;
 
-    for (let part of parts) {
-      const data = extractData(part);
+      const attempt = parseListing(buffer);
 
-      if (!data) {
-        console.log("⚠️ Not enough data, skipping");
-        continue;
+      if (attempt) {
+        if (!isDuplicate(attempt)) {
+          await pushToSheet(attempt);
+        }
+        buffer = "";
       }
+    }
 
-      if (isDuplicate(data)) continue;
-
-      await pushToSheet(data);
+    if (buffer.trim()) {
+      console.log("⚠️ Not enough data, skipping:", buffer.trim());
     }
   } catch (err) {
-    console.error("Webhook Error:", err.message);
+    console.error("❌ Webhook Error:", err.message);
   }
 
   res.sendStatus(200);
 });
 
-// ================= HEALTH CHECK =================
+// ================= ROOT =================
 
 app.get("/", (req, res) => {
-  res.send("Server is live");
+  res.send("Server live");
 });
 
 app.listen(PORT, () => {
