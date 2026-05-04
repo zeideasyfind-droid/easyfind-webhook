@@ -1,6 +1,7 @@
 const express = require("express");
 const app = express();
 
+// Middleware
 app.use(express.json());
 
 // VERIFY WEBHOOK (GET)
@@ -12,6 +13,7 @@ app.get("/", (req, res) => {
   const challenge = req.query["hub.challenge"];
 
   if (mode && token === VERIFY_TOKEN) {
+    console.log("Webhook verified");
     return res.status(200).send(challenge);
   } else {
     return res.sendStatus(403);
@@ -26,6 +28,9 @@ app.post("/", (req, res) => {
   res.sendStatus(200);
 });
 
-app.listen(3000, () => {
-  console.log("Server is running on port 3000");
+// IMPORTANT: Dynamic port for Render
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log("Server is running on port " + PORT);
 });
