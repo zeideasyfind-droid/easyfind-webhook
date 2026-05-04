@@ -5,98 +5,50 @@ const { google } = require("googleapis");
 const app = express();
 app.use(bodyParser.json());
 
-// ===== CONFIG =====
-const VERIFY_TOKEN = "easyfind_verify_token";
-const SPREADSHEET_ID = "1BbuD7HbL6Hct3VbAaomx890wKsvVUvtIb4j8QJ7SFo4";
-const SHEET_NAME = "Live Tracking";
-const PORT = process.env.PORT || 10000;
+// ✅ Root route (this fixes your issue)
+app.get("/", (req, res) => {
+  res.send("EasyFind Webhook is LIVE 🚀");
+});
 
-// ===== GOOGLE AUTH =====
+// 🔐 Google Sheets setup
 const auth = new google.auth.GoogleAuth({
   credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 
-const sheets = google.sheets({ version: "v4", auth });
+const SHEET_ID = "YOUR_GOOGLE_SHEET_ID"; // we will update this next
 
-// ===== WEBHOOK VERIFICATION =====
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("Webhook verified");
-    return res.status(200).send(challenge);
-  } else {
-    return res.sendStatus(403);
-  }
-});
-
-// ===== DUPLICATE CHECK =====
-async function isDuplicate(messageId) {
-  try {
-    const response = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!Y:Y`,
-    });
-
-    const rows = response.data.values || [];
-    return rows.some((row) => row[0] === messageId);
-  } catch (err) {
-    console.log("Duplicate check error:", err.message);
-    return false;
-  }
-}
-
-// ===== RECEIVE WEBHOOK =====
+// 📩 Webhook route
 app.post("/webhook", async (req, res) => {
   try {
-    const body = req.body;
+    const client = await auth.getClient();
+    const sheets = google.sheets({ version: "v4", auth: client });
 
-    if (!body.entry) return res.sendStatus(200);
+    const data = req.body;
 
-    const change = body.entry[0].changes[0].value;
-
-    // Ignore delivery/read updates
-    if (!change.messages) return res.sendStatus(200);
-
-    const msg = change.messages[0];
-
-    const messageId = msg.id;
-    const sender = msg.from;
-    const text = msg.text ? msg.text.body : "";
-    const timestamp = new Date(parseInt(msg.timestamp) * 1000).toISOString();
-
-    console.log("Incoming:", text);
-
-    // Duplicate protection
-    const duplicate = await isDuplicate(messageId);
-    if (duplicate) {
-      console.log("Duplicate skipped");
-      return res.sendStatus(200);
-    }
-
-    // ===== WRITE TO SHEET (COLUMN Y ONWARDS) =====
     await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!Y:AB`,
+      spreadsheetId: SHEET_ID,
+      range: "Sheet1!A1",
       valueInputOption: "USER_ENTERED",
       requestBody: {
-        values: [[messageId, sender, text, timestamp]],
+        values: [[
+          data.name || "",
+          data.phone || "",
+          data.message || "",
+          new Date().toLocaleString()
+        ]],
       },
     });
 
-    console.log("Saved to sheet ✅");
-
-    res.sendStatus(200);
+    res.status(200).send("Data added to sheet");
   } catch (error) {
-    console.error("Error:", error.message);
-    res.sendStatus(500);
+    console.error(error);
+    res.status(500).send("Error");
   }
 });
 
-// ===== START SERVER =====
+// 🚀 Start server
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
