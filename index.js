@@ -7,122 +7,124 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 const VERIFY_TOKEN = "easyfind123";
 
-// ================= GOOGLE SHEETS =================
+// ===============================
+// GOOGLE SHEETS SETUP
+// ===============================
+
+const SHEET_ID = process.env.SHEET_ID;
+
 const auth = new google.auth.GoogleAuth({
   credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 
-const SHEET_ID = process.env.SHEET_ID;
+const sheets = google.sheets({ version: "v4", auth });
 
-// ================= MEMORY =================
-let lastListingSignature = null;
-let counter = 1;
+// ===============================
+// MEMORY
+// ===============================
 
-// ================= HELPERS =================
-function hasMinimumData(text) {
-  if (!text) return false;
-  const t = text.toLowerCase();
-  return t.includes("bhk") && (t.includes("rent") || t.includes("₹") || t.includes("k"));
+let recentListings = [];
+
+// ===============================
+// HELPERS
+// ===============================
+
+function generateKey(listing) {
+  return `${listing.bhk || ""}-${listing.rent || ""}-${listing.location || ""}`
+    .toLowerCase()
+    .trim();
 }
 
-function extractDetails(text) {
+function isDuplicate(listing, rawMessage) {
+  const key = generateKey(listing);
+
+  if (recentListings.includes(key)) {
+    console.log("⚠️ Skipped duplicate-like listing");
+    console.log("DATA:", rawMessage);
+    return true;
+  }
+
+  return false;
+}
+
+function markAsSeen(listing) {
+  const key = generateKey(listing);
+  recentListings.push(key);
+
+  if (recentListings.length > 50) {
+    recentListings.shift();
+  }
+}
+
+// ===============================
+// PARSER (SMART + FLEXIBLE)
+// ===============================
+
+function parseMessage(text) {
   const lower = text.toLowerCase();
 
+  const bhkMatch = text.match(/(\d+)\s*bhk/i);
+  const rentMatch = text.match(/(?:rent[:\s]*)?(\d+)\s*k/i);
+  const depositMatch = text.match(/(\d+(\.\d+)?)\s*l/i);
+  const sqftMatch = text.match(/(\d{3,5})\s*sqft/i);
+  const locationMatch = text.match(/location[:\s]*(.*)/i);
+
   return {
-    bhk: (text.match(/\d+\s*bhk/i) || [""])[0],
-    rent: (text.match(/rent[:\s]*([\d.]+k?)/i) || ["", ""])[1],
-    maintenance: (text.match(/maintenance[:\s]*([\d.]+k?)/i) || ["", ""])[1],
-    deposit: (text.match(/deposit[:\s]*([\d.]+l?k?)/i) || ["", ""])[1],
-    size: (text.match(/sqft[:\s]*(\d+)/i) || ["", ""])[1],
-    floor: (text.match(/floor[:\s]*([\d/]+)/i) || ["", ""])[1],
-    furnishing: lower.includes("semi")
-      ? "Semi Furnished"
-      : lower.includes("fully")
-      ? "Fully Furnished"
-      : lower.includes("partial")
-      ? "Partially Furnished"
-      : "",
-    pets: lower.includes("not allowed")
-      ? "No"
-      : lower.includes("allowed")
-      ? "Yes"
-      : "",
-    availability: lower.includes("immediate") || lower.includes("ready")
-      ? "Immediate"
-      : "",
-    location: (text.match(/near\s(.+)/i) || ["", ""])[1],
+    bhk: bhkMatch ? `${bhkMatch[1]} BHK` : "",
+    rent: rentMatch ? Number(rentMatch[1]) * 1000 : "",
+    deposit: depositMatch ? Number(depositMatch[1]) * 100000 : "",
+    sqft: sqftMatch ? sqftMatch[1] : "",
+    location: locationMatch ? locationMatch[1].trim() : "",
   };
 }
 
-function generatePID() {
-  const now = new Date();
-  const dd = String(now.getDate()).padStart(2, "0");
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const yy = String(now.getFullYear()).slice(-2);
+// ===============================
+// PUSH TO SHEET
+// ===============================
 
-  const num = String(counter).padStart(3, "0");
-  counter++;
+async function pushToSheet(listing, rawMessage, phone, messageId) {
+  try {
+    if (!SHEET_ID) {
+      console.log("❌ SHEET_ID missing");
+      return false;
+    }
 
-  return `EF-${dd}${mm}${yy}-${num}`;
+    const row = [
+      `EF-${Date.now()}`, // PID
+      "WhatsApp", // Source
+      listing.location,
+      listing.bhk,
+      listing.rent,
+      listing.deposit,
+      listing.sqft,
+      rawMessage,
+      phone,
+      messageId,
+      new Date().toISOString(),
+    ];
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: "Sheet1!A1",
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [row],
+      },
+    });
+
+    console.log("✅ Added to sheet:", listing.bhk, listing.rent);
+    return true;
+  } catch (err) {
+    console.log("❌ Sheet Error:", err.message);
+    return false;
+  }
 }
 
-// 🔥 KEY PART → detect new listing smartly
-function getListingSignature(details) {
-  return `${details.bhk}-${details.rent}`;
-}
+// ===============================
+// VERIFY WEBHOOK
+// ===============================
 
-// ================= SHEET PUSH =================
-async function pushToSheet(data, raw, msgId, phone, timestamp) {
-  const client = await auth.getClient();
-  const sheets = google.sheets({ version: "v4", auth: client });
-
-  const now = new Date().toLocaleString();
-
-  const row = [
-    data.pid,
-    "Online",
-    data.location,
-    "Gated",
-    "",
-    data.bhk,
-    "",
-    "",
-    "",
-    data.size,
-    data.floor,
-    data.furnishing,
-    "",
-    "",
-    data.pets,
-    data.rent,
-    data.maintenance,
-    data.deposit,
-    data.availability,
-    "",
-    "",
-    data.availability,
-    now,
-    now,
-    msgId,
-    phone,
-    raw,
-    timestamp,
-  ];
-
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: "Live Tracking!A:AB",
-    valueInputOption: "USER_ENTERED",
-    requestBody: {
-      values: [row],
-    },
-  });
-
-  console.log("✅ Added:", data.pid);
-}
-
-// ================= WEBHOOK VERIFY =================
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -135,7 +137,10 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// ================= MAIN =================
+// ===============================
+// MAIN WEBHOOK
+// ===============================
+
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
@@ -143,53 +148,48 @@ app.post("/webhook", async (req, res) => {
     const message =
       body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (!message) return res.sendStatus(200);
+    if (!message) {
+      return res.sendStatus(200);
+    }
 
     const text = message?.text?.body || "";
-    const msgId = message.id;
-    const from = message.from;
-    const timestamp = message.timestamp;
+    const from = message?.from || "";
+    const messageId = message?.id || "";
 
     console.log("📩 Incoming:", text);
 
-    // break loosely (not strict)
-    const chunks = text.split(/[-_]{3,}|[*]{3,}|—+/);
+    const listing = parseMessage(text);
 
-    for (let chunk of chunks) {
-      const clean = chunk.trim();
-      if (!clean) continue;
+    // basic validation (smart, not strict)
+    if (!listing.bhk && !listing.rent) {
+      console.log("⚠️ Not enough data, skipping");
+      return res.sendStatus(200);
+    }
 
-      if (!hasMinimumData(clean)) continue;
+    if (!isDuplicate(listing, text)) {
+      const success = await pushToSheet(
+        listing,
+        text,
+        from,
+        messageId
+      );
 
-      const details = extractDetails(clean);
-      const signature = getListingSignature(details);
-
-      // 🔥 smart duplicate / new detection
-      if (signature !== lastListingSignature) {
-        lastListingSignature = signature;
-
-        const pid = generatePID();
-
-        await pushToSheet(
-          { ...details, pid },
-          clean,
-          msgId,
-          from,
-          timestamp
-        );
-      } else {
-        console.log("⚠️ Skipped duplicate-like listing");
+      if (success) {
+        markAsSeen(listing);
       }
     }
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("ERROR:", err);
+    console.error(err);
     res.sendStatus(500);
   }
 });
 
-// ================= START =================
+// ===============================
+// START SERVER
+// ===============================
+
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
