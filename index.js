@@ -6,13 +6,11 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// ================= CONFIG =================
-
+// ===== SHEET CONFIG (VERIFIED) =====
 const SPREADSHEET_ID = "1BbuD7HbL6Hct3VbAaomx890wKsvVUvtIb4j8QJ7SFo4";
 const SHEET_NAME = "Live Tracking";
 
-// ================= GOOGLE AUTH =================
-
+// ===== GOOGLE AUTH =====
 const auth = new google.auth.GoogleAuth({
   credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
@@ -20,80 +18,118 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: "v4", auth });
 
-// ================= SMART PARSER =================
-
+// ===== PARSER =====
 function parseListing(text) {
   if (!text) return null;
 
-  const lower = text.toLowerCase();
+  const t = text.toLowerCase();
 
-  const bhkMatch = lower.match(/(\d+)\s*bhk/);
-  const rentMatch = lower.match(/(\d+)\s*k/);
+  const bhk = t.match(/(\d+)\s*bhk/)?.[1];
+  const rent = t.match(/rent[:\s]*([\d.]+)\s*k/)?.[1];
+  const maintenance = t.match(/maintenance[:\s]*([\d.]+)\s*k/)?.[1];
+  const deposit = t.match(/deposit[:\s]*([\d.]+)\s*l/)?.[1];
+  const sqft = t.match(/(sqft|area)[:\s]*([\d]+)/)?.[2];
+  const floor = t.match(/floor[:\s]*([\d/]+)/)?.[1];
+  const bathrooms = t.match(/(\d+)\s*bath/)?.[1];
+  const balcony = t.match(/(\d+)\s*balcon/)?.[1];
 
-  const locationMatch = lower.match(
-    /(harlur|bellandur|hsr|koramangala|sarjapur|marathahalli|whitefield)/
-  );
+  const location =
+    text.match(/location[:\s]*\*?(.+)/i)?.[1]?.replace(/\*/g, "").trim() || "";
 
-  if (!bhkMatch || !rentMatch) return null;
+  const furnishing =
+    t.includes("fully") ? "Fully Furnished" :
+    t.includes("semi") ? "Semi Furnished" :
+    "Unfurnished";
+
+  const pets = t.includes("pets: allowed") ? "Yes" : "No";
+
+  if (!bhk || !rent) return null;
 
   return {
-    bhk: bhkMatch[1] + " BHK",
-    rent: parseInt(rentMatch[1]) * 1000,
-    location: locationMatch ? locationMatch[1] : "",
-    raw: text.trim(),
+    bhk: `${bhk} BHK`,
+    rent: Number(rent) * 1000,
+    maintenance: maintenance ? Number(maintenance) * 1000 : "",
+    deposit: deposit ? `${deposit} L` : "",
+    sqft: sqft || "",
+    floor: floor || "",
+    location,
+    bathrooms: bathrooms || "",
+    balcony: balcony || "",
+    furnishing,
+    pets,
+    raw: text,
   };
 }
 
-// ================= DUPLICATE HANDLING =================
-
+// ===== DUPLICATE HANDLING =====
 const cache = new Set();
 
-function isDuplicate(data) {
-  const key = `${data.bhk}-${data.rent}-${data.location}`;
+function isDuplicate(d) {
+  const key = `${d.bhk}-${d.rent}-${d.location}`;
 
   if (cache.has(key)) {
     console.log("⚠️ Skipped duplicate-like listing");
-    console.log("DATA:", data.raw);
+    console.log("DATA:", d.raw);
     return true;
   }
 
   cache.add(key);
-
-  // Auto clear after 5 mins
-  setTimeout(() => cache.delete(key), 5 * 60 * 1000);
+  setTimeout(() => cache.delete(key), 300000);
 
   return false;
 }
 
-// ================= PUSH TO SHEET =================
-
-async function pushToSheet(data) {
+// ===== PUSH TO SHEET =====
+async function pushToSheet(d) {
   try {
+    const now = new Date();
+
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
       range: `${SHEET_NAME}!A1`,
       valueInputOption: "USER_ENTERED",
       requestBody: {
-        values: [
-          [
-            new Date().toLocaleString(),
-            data.bhk,
-            data.rent,
-            data.location,
-            data.raw,
-          ],
-        ],
-      },
+        values: [[
+          now.toLocaleString(),      // A PID (temporary timestamp)
+          "Online",                  // B Onboarding Type (VALID)
+          d.location,                // C Property Location
+          "Gated",                   // D Apartment Type (VALID)
+          "",                        // E Society Name
+          d.bhk,                     // F BHK (VALID dropdown)
+          d.bathrooms,               // G Bathrooms
+          d.balcony,                 // H Balcony
+          "",                        // I Utility
+          d.sqft,                    // J Size
+          d.floor,                   // K Floor
+          d.furnishing,              // L Furnishing (VALID)
+          "Open for All",            // M Clients Preferred (VALID)
+          "No Restriction",          // N Veg/NonVeg (VALID)
+          d.pets,                    // O Pets (VALID)
+          d.rent,                    // P Rent
+          d.maintenance,             // Q Maintenance
+          d.deposit,                 // R Deposit
+          "",                        // S Available From
+          "Open for negotiations",   // T Scope (VALID)
+          "",                        // U Visit Timing
+          "Available",               // V Availability (VALID)
+          now.toLocaleString(),      // W Date Added
+          now.toLocaleString(),      // X Last Updated
+          "",                        // Y Message ID (future)
+          "",                        // Z Sender Phone (future)
+          d.raw,                     // AA Raw Message
+          now.toISOString()          // AB Timestamp
+        ]]
+      }
     });
 
-    console.log("✅ Added:", data.raw);
+    console.log("✅ Added SUCCESSFULLY");
+
   } catch (err) {
     console.error("❌ Sheet Error:", err.message);
   }
 }
 
-// ================= CORE WEBHOOK =================
-
+// ===== WEBHOOK =====
 app.post("/webhook", async (req, res) => {
   try {
     const message =
@@ -101,36 +137,16 @@ app.post("/webhook", async (req, res) => {
 
     if (!message) return res.sendStatus(200);
 
-    console.log("📩 Incoming FULL MESSAGE:\n", message);
+    console.log("📩 FULL MESSAGE:\n", message);
 
-    // ✅ 1. Try full message directly
-    let data = parseListing(message);
+    const data = parseListing(message);
 
     if (data && !isDuplicate(data)) {
       await pushToSheet(data);
-      return res.sendStatus(200);
+    } else {
+      console.log("⚠️ Not enough data OR duplicate");
     }
 
-    // ✅ 2. Try smart line grouping
-    const lines = message.split("\n");
-    let buffer = "";
-
-    for (let line of lines) {
-      buffer += " " + line;
-
-      const attempt = parseListing(buffer);
-
-      if (attempt) {
-        if (!isDuplicate(attempt)) {
-          await pushToSheet(attempt);
-        }
-        buffer = "";
-      }
-    }
-
-    if (buffer.trim()) {
-      console.log("⚠️ Not enough data, skipping:", buffer.trim());
-    }
   } catch (err) {
     console.error("❌ Webhook Error:", err.message);
   }
@@ -138,12 +154,7 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
-// ================= ROOT =================
-
-app.get("/", (req, res) => {
-  res.send("Server live");
-});
-
+// ===== START SERVER =====
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 Running on port ${PORT}`);
 });
