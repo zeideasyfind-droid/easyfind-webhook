@@ -1,7 +1,12 @@
 const express = require("express");
 const { google } = require("googleapis");
+const cors = require("cors");
 
 const app = express();
+
+// ✅ ADD THIS LINE (VERY IMPORTANT)
+app.use(cors());
+
 app.use(express.json());
 
 // 🔑 Load service account from ENV
@@ -32,7 +37,7 @@ app.post("/webhook", async (req, res) => {
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
-      range: "Sheet1!A:D",
+      range: "Live Tracking!A:D", // ✅ FIXED
       valueInputOption: "USER_ENTERED",
       requestBody: {
         values: [
