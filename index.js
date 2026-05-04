@@ -1,89 +1,158 @@
-```javascript
 const express = require("express");
-const app = express();
+const { google } = require("googleapis");
 
+const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 const VERIFY_TOKEN = "easyfind123";
 
-// ==============================
-// 🧠 MEMORY (TEMP STORAGE)
-// ==============================
+// ================================
+// 🔑 GOOGLE SHEETS SETUP
+// ================================
+const auth = new google.auth.GoogleAuth({
+  credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
+  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+});
 
-let currentListing = null;
-let lastMessageTime = null;
+const SHEET_ID = process.env.SHEET_ID;
 
-// ==============================
-// 🔧 HELPERS
-// ==============================
+// ================================
+// 🧠 TEMP MEMORY
+// ================================
+let currentListing = {
+  text: "",
+  images: [],
+  mapLink: "",
+};
 
-function isListingStart(text) {
-  if (!text) return false;
+let listingCounter = 1;
 
-  const t = text.toLowerCase();
-
-  return (
-    t.includes("bhk") &&
-    (t.includes("rent") || t.includes("₹") || t.includes("k"))
-  );
-}
-
+// ================================
+// 🔍 HELPERS
+// ================================
 function isSeparator(text) {
   if (!text) return false;
-
   return (
-    text.includes("-----") ||
+    text.includes("----") ||
     text.includes("___") ||
     text.includes("***") ||
-    text.includes("——")
+    text.includes("—")
   );
 }
 
-function isNoise(text) {
-  if (!text) return true;
+function extractDetails(text) {
+  const lower = text.toLowerCase();
 
-  const t = text.trim().toLowerCase();
-
-  if (t.length < 8) return true;
-
-  const noiseWords = ["ok", "okay", "available?", "yes", "no", ".", "👍"];
-
-  return noiseWords.includes(t);
+  return {
+    bhk: (text.match(/\d+\s*bhk/i) || [""])[0],
+    rent: (text.match(/rent[:\s]*([\d.]+k?)/i) || ["", ""])[1],
+    maintenance: (text.match(/maintenance[:\s]*([\d.]+k?)/i) || ["", ""])[1],
+    deposit: (text.match(/deposit[:\s]*([\d.]+l?k?)/i) || ["", ""])[1],
+    size: (text.match(/sqft[:\s]*(\d+)/i) || ["", ""])[1],
+    floor: (text.match(/floor[:\s]*([\d/]+)/i) || ["", ""])[1],
+    furnishing: lower.includes("semi")
+      ? "Semi Furnished"
+      : lower.includes("fully")
+      ? "Fully Furnished"
+      : lower.includes("partial")
+      ? "Partially Furnished"
+      : "",
+    pets: lower.includes("not allowed") ? "No" : lower.includes("allowed") ? "Yes" : "",
+    availability: lower.includes("immediate") || lower.includes("ready")
+      ? "Immediate"
+      : "",
+    location: (text.match(/near\s(.+)/i) || ["", ""])[1],
+  };
 }
 
-function isMapLink(text) {
-  if (!text) return false;
+function generatePID() {
+  const now = new Date();
+  const dd = String(now.getDate()).padStart(2, "0");
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const yy = String(now.getFullYear()).slice(-2);
 
-  return (
-    text.includes("maps.google.com") ||
-    text.includes("maps.app.goo.gl")
+  const counter = String(listingCounter).padStart(3, "0");
+  listingCounter++;
+
+  return `EF-${dd}${mm}${yy}-${counter}`;
+}
+
+// ================================
+// 📤 PUSH TO GOOGLE SHEETS
+// ================================
+async function pushToSheet(data, raw, msgId, phone, timestamp) {
+  const client = await auth.getClient();
+  const sheets = google.sheets({ version: "v4", auth: client });
+
+  const now = new Date().toLocaleString();
+
+  const row = [
+    data.pid,
+    "Online",
+    data.location,
+    "Gated",
+    "",
+    data.bhk,
+    "",
+    "",
+    "",
+    data.size,
+    data.floor,
+    data.furnishing,
+    "",
+    "",
+    data.pets,
+    data.rent,
+    data.maintenance,
+    data.deposit,
+    data.availability,
+    "",
+    "",
+    data.availability,
+    now,
+    now,
+    msgId,
+    phone,
+    raw,
+    timestamp,
+  ];
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SHEET_ID,
+    range: "Live Tracking!A:AB",
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [row],
+    },
+  });
+
+  console.log("✅ Added to sheet:", data.pid);
+}
+
+// ================================
+// 🔄 FINALIZE LISTING
+// ================================
+async function finalizeListing(msgId, phone, timestamp) {
+  if (!currentListing.text && !currentListing.mapLink) return;
+
+  const details = extractDetails(currentListing.text);
+  const pid = generatePID();
+
+  await pushToSheet(
+    { ...details, pid },
+    JSON.stringify(currentListing),
+    msgId,
+    phone,
+    timestamp
   );
+
+  currentListing = { text: "", images: [], mapLink: "" };
 }
 
-function extractLocationFromMap(link) {
-  try {
-    const decoded = decodeURIComponent(link);
-    return decoded.split("?q=")[1] || decoded;
-  } catch {
-    return link;
-  }
-}
-
-function finalizeListing() {
-  if (!currentListing) return;
-
-  console.log("✅ FINAL LISTING:", currentListing);
-
-  // 👉 NEXT STEP: Send to Google Sheets API (we will plug later)
-
-  currentListing = null;
-}
-
-// ==============================
-// ✅ VERIFY WEBHOOK
-// ==============================
-
+// ================================
+// 🔐 VERIFY WEBHOOK
+// ================================
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -96,98 +165,52 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// ==============================
-// 📩 RECEIVE WHATSAPP
-// ==============================
-
+// ================================
+// 📥 RECEIVE WHATSAPP
+// ================================
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
+
+    console.log("FULL PAYLOAD:", JSON.stringify(body, null, 2));
 
     const message =
       body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
     if (!message) return res.sendStatus(200);
 
-    const text = message?.text?.body || "";
-    const from = message?.from;
+    const msgId = message.id;
+    const from = message.from;
+    const timestamp = message.timestamp;
 
-    console.log("📩:", text);
+    if (message.type === "text") {
+      const text = message.text.body;
 
-    const now = Date.now();
-
-    // ============================
-    // ⏱ AUTO CLOSE (TIMEOUT)
-    // ============================
-
-    if (lastMessageTime && now - lastMessageTime > 30000) {
-      finalizeListing();
+      if (isSeparator(text)) {
+        await finalizeListing(msgId, from, timestamp);
+      } else {
+        currentListing.text += "\n" + text;
+      }
     }
 
-    lastMessageTime = now;
-
-    // ============================
-    // 🔴 SEPARATOR (STRONG CLOSE)
-    // ============================
-
-    if (isSeparator(text)) {
-      finalizeListing();
-      return res.sendStatus(200);
+    if (message.type === "image") {
+      currentListing.images.push(message.image.id);
     }
 
-    // ============================
-    // 🟢 NEW LISTING START
-    // ============================
-
-    if (isListingStart(text)) {
-      finalizeListing();
-
-      currentListing = {
-        text: text,
-        images: [],
-        location: "",
-        rawMessages: [text],
-        from: from
-      };
-
-      return res.sendStatus(200);
+    if (message.type === "location") {
+      currentListing.mapLink = `https://maps.google.com/?q=${message.location.latitude},${message.location.longitude}`;
     }
 
-    // ============================
-    // 🟡 ATTACH TO CURRENT LISTING
-    // ============================
-
-    if (!currentListing) {
-      return res.sendStatus(200);
-    }
-
-    // Ignore noise
-    if (isNoise(text)) {
-      return res.sendStatus(200);
-    }
-
-    // Map link
-    if (isMapLink(text)) {
-      currentListing.location = extractLocationFromMap(text);
-      currentListing.rawMessages.push(text);
-      return res.sendStatus(200);
-    }
-
-    // Normal text continuation
-    if (text) {
-      currentListing.text += "\n" + text;
-      currentListing.rawMessages.push(text);
-    }
-
-    return res.sendStatus(200);
-
+    res.sendStatus(200);
   } catch (err) {
-    console.error(err);
+    console.error("ERROR:", err);
     res.sendStatus(500);
   }
 });
 
+// ================================
+// 🚀 START SERVER
+// ================================
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
-```
