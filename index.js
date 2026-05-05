@@ -1,5 +1,6 @@
 const express = require("express");
 const { google } = require("googleapis");
+const crypto = require("crypto");
 
 const app = express();
 app.use(express.json());
@@ -15,55 +16,98 @@ const auth = new google.auth.GoogleAuth({
   credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
-
 const sheets = google.sheets({ version: "v4", auth });
+
+// ===== BUFFER =====
+const buffers = {};
+
+// ===== MONEY PARSER =====
+function parseMoney(text) {
+  const match = text.match(/₹?\s*([\d,.]+)\s*(k|l|lakhs?)?/i);
+  if (!match) return "";
+
+  let val = Number(match[1].replace(/,/g, ""));
+  const unit = match[2]?.toLowerCase();
+
+  if (unit === "k") val *= 1000;
+  else if (unit === "l" || unit?.includes("lakh")) val *= 100000;
+
+  return val;
+}
 
 // ===== PARSER =====
 function parseListing(text) {
-  if (!text) return null;
-
   const t = text.toLowerCase();
 
   const bhk = t.match(/(\d+)\s*bhk/)?.[1];
-  const rent = t.match(/rent[:\s]*([\d.]+)\s*k/)?.[1];
-  const maintenance = t.match(/maintenance[:\s]*([\d.]+)\s*k/)?.[1];
-  const deposit = t.match(/deposit[:\s]*([\d.]+)\s*l/)?.[1];
-  const sqft = t.match(/(sqft|area)[:\s]*([\d]+)/)?.[2];
-  const floor = t.match(/floor[:\s]*([\d/]+)/)?.[1];
+
+  const rent = parseMoney(text.match(/rent[^\n]*/i)?.[0] || "");
+  const maintenance = parseMoney(text.match(/maintenance[^\n]*/i)?.[0] || "");
+  const deposit = parseMoney(text.match(/deposit|advance[^\n]*/i)?.[0] || "");
+
+  const sqft = t.match(/(\d+)\s*(sqft|sq ft|area)/)?.[1];
+  const floor = t.match(/(\d+\/\d+|\d+\s*floor)/)?.[1];
   const bathrooms = t.match(/(\d+)\s*bath/)?.[1];
   const balcony = t.match(/(\d+)\s*balcon/)?.[1];
 
-  // NEW FIXES 👇
   const availableFrom =
     text.match(/available\s*from[:\s]*([^\n]+)/i)?.[1]?.trim() || "";
 
+  // ===== SOCIETY =====
   const society =
-    text.match(/\*\s*([^\n]+)\s*\*\s*https/i)?.[1]?.trim() || "";
+    text.match(/\*\s*([^\n*]+?)\s*\*/) ?. [1]?.trim() || "";
 
-  const utility = t.includes("utility") ? "Yes" : "No";
+  // ===== LOCATION =====
+  let location =
+    text.match(/location[:\s]*([^\n]+)/i)?.[1]?.trim() || "";
 
-  const location =
-    text.match(/location[:\s]*\*?(.+)/i)?.[1]?.replace(/\*/g, "").trim() || "";
+  if (!location) {
+    const lines = text.split("\n");
+    for (let line of lines) {
+      line = line.trim();
+      if (
+        line &&
+        !/\d/.test(line) &&
+        line.split(" ").length <= 5 &&
+        !line.toLowerCase().includes("rent")
+      ) {
+        location = line;
+        break;
+      }
+    }
+  }
+
+  if (!location) location = "Unknown";
 
   const furnishing =
     t.includes("fully") ? "Fully Furnished" :
     t.includes("semi") ? "Semi Furnished" :
     "Unfurnished";
 
-  const pets = t.includes("pets: allowed") ? "Yes" : "No";
+  const pets = t.includes("allowed") ? "Yes" : "No";
+  const utility = t.includes("utility") ? "Yes" : "No";
 
-  if (!bhk || !rent) return null;
+  // ===== COMPLETION RULE =====
+  let softCount = 0;
+  if (sqft) softCount++;
+  if (floor) softCount++;
+  if (deposit) softCount++;
+  if (maintenance) softCount++;
+  if (availableFrom) softCount++;
+  if (bathrooms) softCount++;
+
+  if (!(bhk && rent && location && softCount >= 2)) return null;
 
   return {
-    bhk: `${bhk} BHK`,
-    rent: Number(rent) * 1000,
-    maintenance: maintenance ? Number(maintenance) * 1000 : "",
-    deposit: deposit ? `${deposit} L` : "",
-    sqft: sqft || "",
-    floor: floor || "",
+    bhk: bhk ? `${bhk} BHK` : "",
+    rent,
+    maintenance,
+    deposit,
+    sqft,
+    floor,
     location,
-    bathrooms: bathrooms || "",
-    balcony: balcony || "",
+    bathrooms,
+    balcony,
     furnishing,
     pets,
     availableFrom,
@@ -73,70 +117,86 @@ function parseListing(text) {
   };
 }
 
-// ===== DUPLICATE HANDLING =====
-const cache = new Set();
-
-function isDuplicate(d) {
-  const key = `${d.bhk}-${d.rent}-${d.location}`;
-
-  if (cache.has(key)) {
-    console.log("⚠️ Skipped duplicate");
-    return true;
-  }
-
-  cache.add(key);
-  setTimeout(() => cache.delete(key), 300000);
-
-  return false;
+// ===== UNIQUE KEY =====
+function generateKey(d) {
+  const str = `${d.bhk}-${d.rent}-${d.sqft}-${d.floor}-${d.deposit}-${d.location}-${d.society}`;
+  return crypto.createHash("md5").update(str.toLowerCase().replace(/\s/g, "")).digest("hex");
 }
 
-// ===== PUSH TO SHEET =====
+// ===== GET EXISTING KEYS =====
+async function getExistingKeys() {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!AC2:AC`,
+  });
+
+  return new Set((res.data.values || []).flat());
+}
+
+// ===== PUSH =====
 async function pushToSheet(d, sender, messageId) {
-  try {
-    const now = new Date();
+  const existingKeys = await getExistingKeys();
+  const key = generateKey(d);
 
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!A1`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: [[
-          now.toLocaleString(),   // A PID
-          "Online",               // B
-          d.location,             // C
-          "Gated",                // D
-          d.society,              // E ✅ FIXED
-          d.bhk,                  // F
-          d.bathrooms,            // G
-          d.balcony,              // H
-          d.utility,              // I ✅ FIXED
-          d.sqft,                 // J
-          d.floor,                // K
-          d.furnishing,           // L
-          "Open for All",         // M
-          "No Restriction",       // N
-          d.pets,                 // O
-          d.rent,                 // P
-          d.maintenance,          // Q
-          d.deposit,              // R
-          d.availableFrom,        // S ✅ FIXED
-          "Open for negotiations",// T
-          "",                     // U (no data yet)
-          "Available",            // V
-          now.toLocaleString(),   // W
-          now.toLocaleString(),   // X
-          messageId || "",        // Y ✅ FIXED
-          sender || "",           // Z ✅ FIXED
-          d.raw,                  // AA
-          now.toISOString()       // AB
-        ]]
-      }
-    });
+  if (existingKeys.has(key)) {
+    console.log("⚠️ DUPLICATE:", key);
+    return;
+  }
 
-    console.log("✅ Added SUCCESSFULLY");
+  const now = new Date();
 
-  } catch (err) {
-    console.error("❌ Sheet Error:", err.message);
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!A1`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[
+        now.toLocaleString(),
+        "Online",
+        d.location,
+        d.society ? "Gated" : "Non-Gated",
+        d.society,
+        d.bhk,
+        d.bathrooms,
+        d.balcony,
+        d.utility,
+        d.sqft,
+        d.floor,
+        d.furnishing,
+        "Open for All",
+        "No Restriction",
+        d.pets,
+        d.rent,
+        d.maintenance,
+        d.deposit,
+        d.availableFrom,
+        "Open for negotiations",
+        "",
+        "Available",
+        now.toLocaleString(),
+        now.toLocaleString(),
+        messageId || "",
+        sender || "",
+        d.raw,
+        now.toISOString(),
+        key
+      ]]
+    }
+  });
+
+  console.log("✅ INSERTED:", key);
+}
+
+// ===== BUFFER HANDLER =====
+function processBuffer(sender) {
+  const buffer = buffers[sender];
+  if (!buffer) return;
+
+  const data = parseListing(buffer.text);
+
+  if (data) {
+    pushToSheet(data, buffer.sender, buffer.messageId);
+    delete buffers[sender];
   }
 }
 
@@ -151,29 +211,43 @@ app.post("/webhook", async (req, res) => {
 
     if (!message) return res.sendStatus(200);
 
-    console.log("📩 FULL MESSAGE:\n", message);
+    console.log("📩", message);
 
-    const data = parseListing(message);
-
-    if (data && !isDuplicate(data)) {
-      await pushToSheet(data, sender, messageId);
-    } else {
-      console.log("⚠️ Not enough data OR duplicate");
+    if (!buffers[sender]) {
+      buffers[sender] = { text: "", sender, messageId };
     }
 
+    // NEW BHK → flush old
+    if (message.toLowerCase().match(/\d+\s*bhk/) && buffers[sender].text) {
+      processBuffer(sender);
+      buffers[sender] = { text: "", sender, messageId };
+    }
+
+    buffers[sender].text += "\n" + message;
+
+    // MAP LINK → force flush
+    if (message.includes("maps.app.goo.gl")) {
+      processBuffer(sender);
+    }
+
+    // TIMEOUT 30 sec
+    clearTimeout(buffers[sender].timer);
+    buffers[sender].timer = setTimeout(() => {
+      processBuffer(sender);
+    }, 30000);
+
   } catch (err) {
-    console.error("❌ Webhook Error:", err.message);
+    console.error(err);
   }
 
   res.sendStatus(200);
 });
 
-// OPTIONAL ROOT CHECK
+// ROOT
 app.get("/", (req, res) => {
   res.send("Webhook is live ✅");
 });
 
-// ===== START SERVER =====
 app.listen(PORT, () => {
-  console.log(`🚀 Running on port ${PORT}`);
+  console.log(`🚀 Running on ${PORT}`);
 });
