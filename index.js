@@ -20,7 +20,7 @@ const buffers = {};
 
 // ===== CLEAN TEXT =====
 function cleanText(text) {
-  return (text || "").replace(/\*/g, "").trim();
+  return (text || "").replace(/\*/g, "").replace(/[:]/g, "").trim();
 }
 
 // ===== MONEY =====
@@ -44,17 +44,11 @@ function parseListing(text) {
   const bhk = t.match(/(\d+)\s*bhk/)?.[1];
   const rent = parseMoney(text.match(/rent[^\n]*/i)?.[0] || "");
 
-  // ===== MAINTENANCE =====
   let maintenanceLine = text.match(/maintenance[^\n]*/i)?.[0] || "";
-  let maintenance = 0;
+  let maintenance = /including|included|inclusive/i.test(maintenanceLine)
+    ? 0
+    : parseMoney(maintenanceLine);
 
-  if (/including|included|inclusive/i.test(maintenanceLine)) {
-    maintenance = 0;
-  } else {
-    maintenance = parseMoney(maintenanceLine);
-  }
-
-  // ===== DEPOSIT =====
   const depositLine =
     text.match(/(deposit|advance|security|caution)[^\n]*/i)?.[0] || "";
 
@@ -65,7 +59,6 @@ function parseListing(text) {
     deposit = Number(monthMatch[1]) * rent;
   }
 
-  // ===== SIZE =====
   const sqft =
     text.match(/(?:sqft|sq ft|area)\s*[:\-]?\s*(\d+)/i)?.[1] ||
     text.match(/(\d{3,5})\s*(sqft|sq ft)/i)?.[1] ||
@@ -74,7 +67,6 @@ function parseListing(text) {
   const floor = text.match(/(\d+\s*\/\s*\d+)/)?.[1] || "";
   const bathrooms = t.match(/(\d+)\s*bath/)?.[1];
 
-  // ===== BALCONY =====
   let balcony = "";
   if (/(\d+)\s*balcon/i.test(text)) {
     balcony = text.match(/(\d+)\s*balcon/i)[1];
@@ -85,23 +77,24 @@ function parseListing(text) {
   const availableFrom =
     text.match(/available\s*from[:\s]*([^\n]+)/i)?.[1]?.trim() || "";
 
-  // ===== SOCIETY =====
+  // ===== SOCIETY (FIXED) =====
   let society = "";
   const lines = text.split("\n");
 
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].includes("maps.app.goo.gl")) {
-      const possible = cleanText(lines[i - 1] || "");
-
-      // avoid junk
-      if (
-        possible &&
-        !possible.toLowerCase().includes("location") &&
-        !possible.toLowerCase().includes("rent")
-      ) {
-        society = possible;
+  for (let line of lines) {
+    if (line.includes("maps.app.goo.gl")) {
+      const before = line.split("https")[0];
+      if (before.trim()) {
+        society = cleanText(before);
       }
-      break;
+    }
+  }
+
+  if (!society) {
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].includes("maps.app.goo.gl")) {
+        society = cleanText(lines[i - 1] || "");
+      }
     }
   }
 
@@ -109,39 +102,33 @@ function parseListing(text) {
   let location =
     cleanText(text.match(/location[:\s]*([^\n]+)/i)?.[1] || "");
 
+  if (!location && society) location = society;
+
   // ===== GATED =====
-  let gated = society ? "Gated" : "Non-Gated";
+  let gated = /gated/i.test(text) ? "Gated" : "Non-Gated";
 
-  // ===== FURNISHING =====
+  // ===== FURNISHING (FIXED) =====
   let furnishing = "";
-
-  if (/unfurnished/i.test(text)) {
-    furnishing = "Unfurnished";
-  } else if (/\bfull\b|\bfully\b/i.test(text)) {
-    furnishing = "Fully Furnished";
-  } else if (/semi|partial/i.test(text)) {
+  if (t.includes("unfurnished")) furnishing = "Unfurnished";
+  else if (t.includes("fully")) furnishing = "Fully Furnished";
+  else if (t.includes("semi") || t.includes("partial"))
     furnishing = "Semi Furnished";
-  }
 
   // ===== PETS =====
   let pets = "";
   if (/pets.*not/i.test(text)) pets = "No";
   else if (/pets.*allowed/i.test(text)) pets = "Yes";
 
-  // ===== UTILITY =====
   const utility = /utility/i.test(text) ? "Yes" : "No";
 
-  // ===== CLIENT TYPE =====
   let clientType =
     cleanText(text.match(/preferred\s*tenant\s*[:\-]?\s*([^\n]+)/i)?.[1] || "");
 
-  // ===== VEG =====
   let veg = "";
   if (/vegetarian/i.test(text)) veg = "Veg Only";
   else if (/non[-\s]?veg/i.test(text)) veg = "Non Veg";
   else veg = "No Restriction";
 
-  // ===== VALIDATION =====
   let softCount = 0;
   if (sqft) softCount++;
   if (floor) softCount++;
@@ -182,7 +169,6 @@ function generateKey(d) {
     .digest("hex");
 }
 
-// ===== GET KEYS =====
 async function getExistingKeys() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -192,7 +178,6 @@ async function getExistingKeys() {
   return new Set((res.data.values || []).flat());
 }
 
-// ===== PUSH =====
 async function pushToSheet(d, sender, messageId) {
   const existingKeys = await getExistingKeys();
   const key = generateKey(d);
@@ -243,9 +228,11 @@ async function pushToSheet(d, sender, messageId) {
   console.log("✅ INSERTED:", key);
 }
 
-// ===== SPLIT =====
+// ===== SPLIT (FIXED) =====
 function splitListings(text) {
-  return text.split(/(?=\d+\s*bhk)/i);
+  return text
+    .split(/\n\s*\n/)
+    .filter(chunk => /bhk/i.test(chunk));
 }
 
 // ===== PROCESS =====
@@ -296,10 +283,6 @@ app.post("/webhook", async (req, res) => {
   }
 
   res.sendStatus(200);
-});
-
-app.get("/", (req, res) => {
-  res.send("Webhook is live ✅");
 });
 
 app.listen(PORT, () => {
