@@ -18,6 +18,11 @@ const sheets = google.sheets({ version: "v4", auth });
 
 const buffers = {};
 
+// ===== CLEAN TEXT =====
+function cleanText(text) {
+  return text.replace(/\*/g, "").trim();
+}
+
 // ===== MONEY =====
 function parseMoney(text) {
   const match = text.match(/₹?\s*([\d,.]+)\s*(k|l|lakhs?)?/i);
@@ -67,7 +72,6 @@ function parseListing(text) {
     "";
 
   const floor = text.match(/(\d+\s*\/\s*\d+)/)?.[1] || "";
-
   const bathrooms = t.match(/(\d+)\s*bath/)?.[1];
 
   // ===== BALCONY =====
@@ -81,31 +85,29 @@ function parseListing(text) {
   const availableFrom =
     text.match(/available\s*from[:\s]*([^\n]+)/i)?.[1]?.trim() || "";
 
-  // ===== SOCIETY (FROM MAP LINK) =====
+  // ===== SOCIETY =====
   let society = "";
   const lines = text.split("\n");
 
   for (let i = 0; i < lines.length; i++) {
     if (lines[i].includes("maps.app.goo.gl")) {
-      society = lines[i - 1]?.trim() || "";
+      society = cleanText(lines[i - 1] || "");
       break;
     }
   }
 
   // ===== LOCATION =====
   let location =
-    text.match(/location[:\s]*([^\n]+)/i)?.[1]?.trim() || "";
-
-  if (!location) location = "";
+    cleanText(text.match(/location[:\s]*([^\n]+)/i)?.[1] || "");
 
   // ===== GATED =====
   let gated = society ? "Gated" : "Non-Gated";
 
-  // ===== FURNISHING =====
+  // ===== FURNISHING (FIXED) =====
   let furnishing = "";
-  if (/fully/i.test(text)) furnishing = "Fully Furnished";
-  else if (/semi/i.test(text)) furnishing = "Semi Furnished";
-  else if (/unfurnished/i.test(text)) furnishing = "Unfurnished";
+  if (/fully\s*-?\s*furnished/i.test(text)) furnishing = "Fully Furnished";
+  else if (/semi\s*-?\s*furnished/i.test(text)) furnishing = "Semi Furnished";
+  else if (/un\s*furnished/i.test(text)) furnishing = "Unfurnished";
 
   // ===== PETS =====
   let pets = "";
@@ -117,7 +119,7 @@ function parseListing(text) {
 
   // ===== CLIENT TYPE =====
   let clientType =
-    text.match(/preferred\s*tenant\s*[:\-]?\s*([^\n]+)/i)?.[1]?.trim() || "";
+    cleanText(text.match(/preferred\s*tenant\s*[:\-]?\s*([^\n]+)/i)?.[1] || "");
 
   // ===== VEG =====
   let veg = "";
@@ -125,7 +127,7 @@ function parseListing(text) {
   else if (/non[-\s]?veg/i.test(text)) veg = "Non Veg";
   else veg = "No Restriction";
 
-  // ===== COMPLETION CHECK =====
+  // ===== VALIDATION =====
   let softCount = 0;
   if (sqft) softCount++;
   if (floor) softCount++;
@@ -181,10 +183,7 @@ async function pushToSheet(d, sender, messageId) {
   const existingKeys = await getExistingKeys();
   const key = generateKey(d);
 
-  if (existingKeys.has(key)) {
-    console.log("⚠️ DUPLICATE:", key);
-    return;
-  }
+  if (existingKeys.has(key)) return;
 
   const now = new Date();
 
@@ -195,7 +194,7 @@ async function pushToSheet(d, sender, messageId) {
     requestBody: {
       values: [[
         now.toLocaleString(),
-        "WhatsApp",
+        "", // Column B FIXED
         d.location,
         d.gated,
         d.society,
