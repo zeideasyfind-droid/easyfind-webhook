@@ -1,3 +1,12 @@
+// ==============================
+// VERSION P1
+// Fixes:
+// 1. Timer crash fix
+// 2. Safe buffer handling
+// 3. Structured logs
+// 4. Root route added
+// ==============================
+
 const express = require("express");
 const { google } = require("googleapis");
 const crypto = require("crypto");
@@ -17,6 +26,18 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: "v4", auth });
 
 const buffers = {};
+
+// ===== LOGGER =====
+// P1: Structured logs
+function log(title, data = "") {
+  console.log(`\n========== ${title} ==========`);
+
+  if (typeof data === "object") {
+    console.log(JSON.stringify(data, null, 2));
+  } else {
+    console.log(data);
+  }
+}
 
 // ===== CLEAN TEXT =====
 function cleanText(text) {
@@ -77,7 +98,7 @@ function parseListing(text) {
   const availableFrom =
     text.match(/available\s*from[:\s]*([^\n]+)/i)?.[1]?.trim() || "";
 
-  // ===== SOCIETY (FIXED) =====
+  // SOCIETY
   let society = "";
   const lines = text.split("\n");
 
@@ -98,23 +119,19 @@ function parseListing(text) {
     }
   }
 
-  // ===== LOCATION =====
   let location =
     cleanText(text.match(/location[:\s]*([^\n]+)/i)?.[1] || "");
 
   if (!location && society) location = society;
 
-  // ===== GATED =====
   let gated = /gated/i.test(text) ? "Gated" : "Non-Gated";
 
-  // ===== FURNISHING (FIXED) =====
   let furnishing = "";
   if (t.includes("unfurnished")) furnishing = "Unfurnished";
   else if (t.includes("fully")) furnishing = "Fully Furnished";
   else if (t.includes("semi") || t.includes("partial"))
     furnishing = "Semi Furnished";
 
-  // ===== PETS =====
   let pets = "";
   if (/pets.*not/i.test(text)) pets = "No";
   else if (/pets.*allowed/i.test(text)) pets = "Yes";
@@ -161,28 +178,37 @@ function parseListing(text) {
   };
 }
 
-// ===== UNIQUE KEY =====
-function generateKey(d) {
-  const str = `${d.bhk}-${d.rent}-${d.location}-${d.society}`;
-  return crypto.createHash("md5")
-    .update(str.toLowerCase().replace(/\s/g, ""))
-    .digest("hex");
+// ===== PROCESS =====
+function processBuffer(sender) {
+  const buffer = buffers[sender];
+  if (!buffer) return;
+
+  log("PROCESSING BUFFER", sender);
+
+  const listings = buffer.text.split(/\n\s*\n/).filter(x => /bhk/i.test(x));
+
+  for (let chunk of listings) {
+    const data = parseListing(chunk);
+    if (data) {
+      pushToSheet(data, sender, buffer.messageId);
+    }
+  }
+
+  delete buffers[sender];
 }
 
-async function getExistingKeys() {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!AC2:AC`,
-  });
-
-  return new Set((res.data.values || []).flat());
-}
-
+// ===== PUSH =====
 async function pushToSheet(d, sender, messageId) {
-  const existingKeys = await getExistingKeys();
-  const key = generateKey(d);
+  const key = crypto
+    .createHash("md5")
+    .update(`${d.bhk}-${d.rent}-${d.location}-${d.society}`.toLowerCase())
+    .digest("hex");
 
-  if (existingKeys.has(key)) return;
+  log("INSERTING", {
+    bhk: d.bhk,
+    location: d.location,
+    rent: d.rent,
+  });
 
   const now = new Date();
 
@@ -225,31 +251,7 @@ async function pushToSheet(d, sender, messageId) {
     }
   });
 
-  console.log("✅ INSERTED:", key);
-}
-
-// ===== SPLIT (FIXED) =====
-function splitListings(text) {
-  return text
-    .split(/\n\s*\n/)
-    .filter(chunk => /bhk/i.test(chunk));
-}
-
-// ===== PROCESS =====
-function processBuffer(sender) {
-  const buffer = buffers[sender];
-  if (!buffer) return;
-
-  const listings = splitListings(buffer.text);
-
-  for (let chunk of listings) {
-    const data = parseListing(chunk);
-    if (data) {
-      pushToSheet(data, buffer.sender, buffer.messageId);
-    }
-  }
-
-  delete buffers[sender];
+  log("SUCCESS", key);
 }
 
 // ===== WEBHOOK =====
@@ -261,28 +263,38 @@ app.post("/webhook", async (req, res) => {
     const sender = msgObj?.from;
     const messageId = msgObj?.id;
 
-    if (!message) return res.sendStatus(200);
+    if (!message || !sender) return res.sendStatus(200);
+
+    log("NEW MESSAGE", { sender, message });
 
     if (!buffers[sender]) {
-      buffers[sender] = { text: "", sender, messageId };
+      buffers[sender] = { text: "", sender, messageId, timer: null };
     }
 
     buffers[sender].text += "\n" + message;
+
+    if (buffers[sender].timer) {
+      clearTimeout(buffers[sender].timer);
+    }
+
+    buffers[sender].timer = setTimeout(() => {
+      processBuffer(sender);
+    }, 30000);
 
     if (message.includes("maps.app.goo.gl")) {
       processBuffer(sender);
     }
 
-    clearTimeout(buffers[sender].timer);
-    buffers[sender].timer = setTimeout(() => {
-      processBuffer(sender);
-    }, 30000);
-
   } catch (err) {
-    console.error(err);
+    log("ERROR", err.message);
   }
 
   res.sendStatus(200);
+});
+
+// ROOT ROUTE FIX
+app.get("/", (req, res) => {
+  res.send("Webhook is live ✅");
 });
 
 app.listen(PORT, () => {
