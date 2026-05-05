@@ -1,6 +1,6 @@
 // ==============================
 // VERSION P7
-// Changes:
+// Changes:.
 // 1. FIX: Furnishing detection fallback (handles missing semi/fully + partial)
 // 2. FIX: Society extraction edge case (*Name:* https)
 // 3. FIX: Veg detection improved (checks clientType also)
