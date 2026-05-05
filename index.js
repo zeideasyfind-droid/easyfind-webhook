@@ -37,50 +37,57 @@ function parseListing(text) {
   const t = text.toLowerCase();
 
   const bhk = t.match(/(\d+)\s*bhk/)?.[1];
-
   const rent = parseMoney(text.match(/rent[^\n]*/i)?.[0] || "");
 
+  // ===== MAINTENANCE =====
   let maintenanceLine = text.match(/maintenance[^\n]*/i)?.[0] || "";
   let maintenance = 0;
+
   if (/including|included|inclusive/i.test(maintenanceLine)) {
     maintenance = 0;
   } else {
     maintenance = parseMoney(maintenanceLine);
   }
 
+  // ===== DEPOSIT =====
   const depositLine =
     text.match(/(deposit|advance|security|caution)[^\n]*/i)?.[0] || "";
 
   let deposit = parseMoney(depositLine);
 
-  // HANDLE "2 months"
   const monthMatch = depositLine.match(/(\d+)\s*month/i);
   if (monthMatch && rent) {
     deposit = Number(monthMatch[1]) * rent;
   }
 
-  const sqft = text.match(/(\d+)\s*(sqft|sq ft|area)/i)?.[1] || "";
+  // ===== SIZE =====
+  const sqft =
+    text.match(/(?:sqft|sq ft|area)\s*[:\-]?\s*(\d+)/i)?.[1] ||
+    text.match(/(\d{3,5})\s*(sqft|sq ft)/i)?.[1] ||
+    "";
+
   const floor = text.match(/(\d+\s*\/\s*\d+)/)?.[1] || "";
 
   const bathrooms = t.match(/(\d+)\s*bath/)?.[1];
-  const balcony = t.match(/(\d+)\s*balcon/)?.[1];
+
+  // ===== BALCONY =====
+  let balcony = "";
+  if (/(\d+)\s*balcon/i.test(text)) {
+    balcony = text.match(/(\d+)\s*balcon/i)[1];
+  } else if (/a\s*balcon/i.test(text)) {
+    balcony = "1";
+  }
 
   const availableFrom =
     text.match(/available\s*from[:\s]*([^\n]+)/i)?.[1]?.trim() || "";
 
-  // ===== SOCIETY =====
+  // ===== SOCIETY (FROM MAP LINK) =====
   let society = "";
-
-  // Try text-based detection (capital words)
   const lines = text.split("\n");
-  for (let line of lines) {
-    line = line.trim();
-    if (
-      /^[A-Z][A-Za-z\s]+$/.test(line) &&
-      !line.toLowerCase().includes("rent") &&
-      line.split(" ").length <= 5
-    ) {
-      society = line;
+
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes("maps.app.goo.gl")) {
+      society = lines[i - 1]?.trim() || "";
       break;
     }
   }
@@ -89,40 +96,36 @@ function parseListing(text) {
   let location =
     text.match(/location[:\s]*([^\n]+)/i)?.[1]?.trim() || "";
 
-  if (!location && society) location = society;
-
-  if (!location) {
-    for (let line of lines) {
-      line = line.trim();
-      if (
-        line &&
-        !/\d/.test(line) &&
-        line.split(" ").length <= 4 &&
-        !line.toLowerCase().includes("rent")
-      ) {
-        location = line;
-        break;
-      }
-    }
-  }
-
-  if (!location) location = "Unknown";
+  if (!location) location = "";
 
   // ===== GATED =====
-  let gated = "Non-Gated";
-  if (society) gated = "Gated";
+  let gated = society ? "Gated" : "Non-Gated";
 
-  const furnishing =
-    t.includes("fully") ? "Fully Furnished" :
-    t.includes("semi") ? "Semi Furnished" :
-    "Unfurnished";
+  // ===== FURNISHING =====
+  let furnishing = "";
+  if (/fully/i.test(text)) furnishing = "Fully Furnished";
+  else if (/semi/i.test(text)) furnishing = "Semi Furnished";
+  else if (/unfurnished/i.test(text)) furnishing = "Unfurnished";
 
-  const pets =
-    t.includes("pets") && t.includes("not") ? "No" :
-    t.includes("pets") && t.includes("allowed") ? "Yes" : "";
+  // ===== PETS =====
+  let pets = "";
+  if (/pets.*not/i.test(text)) pets = "No";
+  else if (/pets.*allowed/i.test(text)) pets = "Yes";
 
-  const utility = t.includes("utility") ? "Yes" : "No";
+  // ===== UTILITY =====
+  const utility = /utility/i.test(text) ? "Yes" : "No";
 
+  // ===== CLIENT TYPE =====
+  let clientType =
+    text.match(/preferred\s*tenant\s*[:\-]?\s*([^\n]+)/i)?.[1]?.trim() || "";
+
+  // ===== VEG =====
+  let veg = "";
+  if (/vegetarian/i.test(text)) veg = "Veg Only";
+  else if (/non[-\s]?veg/i.test(text)) veg = "Non Veg";
+  else veg = "No Restriction";
+
+  // ===== COMPLETION CHECK =====
   let softCount = 0;
   if (sqft) softCount++;
   if (floor) softCount++;
@@ -131,7 +134,7 @@ function parseListing(text) {
   if (availableFrom) softCount++;
   if (bathrooms) softCount++;
 
-  if (!(bhk && rent && location && softCount >= 2)) return null;
+  if (!(bhk && rent && softCount >= 2)) return null;
 
   return {
     bhk: `${bhk} BHK`,
@@ -149,6 +152,8 @@ function parseListing(text) {
     society,
     gated,
     utility,
+    clientType,
+    veg,
     raw: text,
   };
 }
@@ -156,10 +161,12 @@ function parseListing(text) {
 // ===== UNIQUE KEY =====
 function generateKey(d) {
   const str = `${d.bhk}-${d.rent}-${d.location}-${d.society}`;
-  return crypto.createHash("md5").update(str.toLowerCase().replace(/\s/g, "")).digest("hex");
+  return crypto.createHash("md5")
+    .update(str.toLowerCase().replace(/\s/g, ""))
+    .digest("hex");
 }
 
-// ===== GET EXISTING KEYS =====
+// ===== GET KEYS =====
 async function getExistingKeys() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -188,7 +195,7 @@ async function pushToSheet(d, sender, messageId) {
     requestBody: {
       values: [[
         now.toLocaleString(),
-        "Online",
+        "WhatsApp",
         d.location,
         d.gated,
         d.society,
@@ -199,16 +206,16 @@ async function pushToSheet(d, sender, messageId) {
         d.sqft,
         d.floor,
         d.furnishing,
-        "Open for All",
-        "No Restriction",
+        d.clientType,
+        d.veg,
         d.pets,
         d.rent,
         d.maintenance,
         d.deposit,
         d.availableFrom,
-        "Open for negotiations",
         "",
-        "Available",
+        "",
+        "",
         now.toLocaleString(),
         now.toLocaleString(),
         messageId || "",
@@ -223,12 +230,12 @@ async function pushToSheet(d, sender, messageId) {
   console.log("✅ INSERTED:", key);
 }
 
-// ===== SPLIT MULTI LISTING =====
+// ===== SPLIT =====
 function splitListings(text) {
   return text.split(/(?=\d+\s*bhk)/i);
 }
 
-// ===== PROCESS BUFFER =====
+// ===== PROCESS =====
 function processBuffer(sender) {
   const buffer = buffers[sender];
   if (!buffer) return;
