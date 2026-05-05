@@ -13,6 +13,16 @@ const express = require("express");
 const { google } = require("googleapis");
 const crypto = require("crypto");
 
+// ===== P7 ADD: CLOUDINARY CONFIG (SAFE - NO LOGIC CHANGE) =====
+// Only initializes Cloudinary. Does NOT affect parser / sheet / flow.
+const cloudinary = require("cloudinary").v2;
+
+cloudinary.config({
+  cloud_name: process.env.CLOUD_NAME,
+  api_key: process.env.CLOUD_API_KEY,
+  api_secret: process.env.CLOUD_API_SECRET,
+});
+
 const app = express();
 app.use(express.json());
 
