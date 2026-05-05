@@ -1,14 +1,18 @@
 // ==============================
-// VERSION P7.2.2
+// VERSION P7.3
 // Changes:
-// 1. FIX: Cloudinary 403 resolved using upload_large (binary safe)
-// 2. SAFE: No change to parser / webhook / flow
+// 1. ADD: Google Drive upload (stable replacement for Cloudinary)
+// 2. REPLACE: Only image upload function call (NO other logic touched)
+// 3. SAFE: Parser / webhook / sheet / structure untouched
 // ==============================
 
 const express = require("express");
 const { google } = require("googleapis");
 const crypto = require("crypto");
 const fetch = require("node-fetch");
+
+// ===== P7.3 ADD =====
+const { Readable } = require("stream");
 
 const cloudinary = require("cloudinary").v2;
 
@@ -22,9 +26,19 @@ const SHEET_NAME = "Live Tracking";
 
 const auth = new google.auth.GoogleAuth({
   credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
-  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  scopes: [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+  ],
 });
+
 const sheets = google.sheets({ version: "v4", auth });
+
+// ===== P7.3 ADD =====
+const drive = google.drive({ version: "v3", auth });
+
+// ⚠️ PUT YOUR FOLDER ID HERE
+const DRIVE_FOLDER_ID = "PASTE_YOUR_FOLDER_ID_HERE";
 
 const buffers = {};
 
@@ -68,28 +82,60 @@ function parseMoney(text) {
   return val;
 }
 
-// ===== P7.2.2 FIX: CLOUDINARY UPLOAD =====
-
+// ===== EXISTING CLOUDINARY FUNCTION (UNCHANGED - NOT USED NOW) =====
 async function uploadBufferToCloudinary(buffer) {
   try {
     const base64 = Buffer.from(buffer).toString("base64");
 
     const result = await cloudinary.uploader.upload(
       `data:image/jpeg;base64,${base64}`,
-      {
-        folder: "easyfind_properties",
-      }
+      { folder: "easyfind_properties" }
     );
 
     return result.secure_url;
-
   } catch (err) {
     log("CLOUDINARY ERROR", err.message);
     return "";
   }
 }
 
-// ===== PARSER =====
+// ===== P7.3 ADD: GOOGLE DRIVE UPLOAD =====
+async function uploadToDrive(buffer) {
+  try {
+    const stream = Readable.from(buffer);
+
+    const res = await drive.files.create({
+      requestBody: {
+        name: `property_${Date.now()}.jpg`,
+        parents: [DRIVE_FOLDER_ID],
+      },
+      media: {
+        mimeType: "image/jpeg",
+        body: stream,
+      },
+      fields: "id",
+    });
+
+    const fileId = res.data.id;
+
+    // Make public
+    await drive.permissions.create({
+      fileId,
+      requestBody: {
+        role: "reader",
+        type: "anyone",
+      },
+    });
+
+    return `https://drive.google.com/uc?id=${fileId}`;
+
+  } catch (err) {
+    log("DRIVE ERROR", err.message);
+    return "";
+  }
+}
+
+// ===== PARSER (UNCHANGED) =====
 function parseListing(text) {
   if (!text) return null;
 
@@ -216,7 +262,7 @@ function parseListing(text) {
   };
 }
 
-// ===== PROCESS =====
+// ===== PROCESS (UNCHANGED) =====
 async function processBuffer(sender) {
   const buffer = buffers[sender];
   if (!buffer) return;
@@ -235,7 +281,7 @@ async function processBuffer(sender) {
   delete buffers[sender];
 }
 
-// ===== PUSH =====
+// ===== PUSH (UNCHANGED) =====
 async function pushToSheet(d, sender, messageId, imageUrl = "") {
   const key = crypto
     .createHash("md5")
@@ -287,7 +333,7 @@ async function pushToSheet(d, sender, messageId, imageUrl = "") {
   log("SUCCESS", key);
 }
 
-// ===== WEBHOOK =====
+// ===== WEBHOOK (ONLY CHANGE: uploadToDrive) =====
 app.post("/webhook", async (req, res) => {
   try {
     const msgObj = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
@@ -325,7 +371,8 @@ app.post("/webhook", async (req, res) => {
 
         const imageBuffer = await imageResponse.arrayBuffer();
 
-        imageUrl = await uploadBufferToCloudinary(imageBuffer);
+        // ===== ONLY LINE CHANGED =====
+        imageUrl = await uploadToDrive(imageBuffer);
 
       } catch (err) {
         log("IMAGE ERROR", err.message);
