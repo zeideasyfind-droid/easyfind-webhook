@@ -7,21 +7,18 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// ===== SHEET CONFIG =====
 const SPREADSHEET_ID = "1BbuD7HbL6Hct3VbAaomx890wKsvVUvtIb4j8QJ7SFo4";
 const SHEET_NAME = "Live Tracking";
 
-// ===== GOOGLE AUTH =====
 const auth = new google.auth.GoogleAuth({
   credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 const sheets = google.sheets({ version: "v4", auth });
 
-// ===== BUFFER =====
 const buffers = {};
 
-// ===== MONEY PARSER =====
+// ===== MONEY =====
 function parseMoney(text) {
   const match = text.match(/₹?\s*([\d,.]+)\s*(k|l|lakhs?)?/i);
   if (!match) return "";
@@ -42,11 +39,29 @@ function parseListing(text) {
   const bhk = t.match(/(\d+)\s*bhk/)?.[1];
 
   const rent = parseMoney(text.match(/rent[^\n]*/i)?.[0] || "");
-  const maintenance = parseMoney(text.match(/maintenance[^\n]*/i)?.[0] || "");
-  const deposit = parseMoney(text.match(/deposit|advance[^\n]*/i)?.[0] || "");
 
-  const sqft = t.match(/(\d+)\s*(sqft|sq ft|area)/)?.[1];
-  const floor = t.match(/(\d+\/\d+|\d+\s*floor)/)?.[1];
+  let maintenanceLine = text.match(/maintenance[^\n]*/i)?.[0] || "";
+  let maintenance = 0;
+  if (/including|included|inclusive/i.test(maintenanceLine)) {
+    maintenance = 0;
+  } else {
+    maintenance = parseMoney(maintenanceLine);
+  }
+
+  const depositLine =
+    text.match(/(deposit|advance|security|caution)[^\n]*/i)?.[0] || "";
+
+  let deposit = parseMoney(depositLine);
+
+  // HANDLE "2 months"
+  const monthMatch = depositLine.match(/(\d+)\s*month/i);
+  if (monthMatch && rent) {
+    deposit = Number(monthMatch[1]) * rent;
+  }
+
+  const sqft = text.match(/(\d+)\s*(sqft|sq ft|area)/i)?.[1] || "";
+  const floor = text.match(/(\d+\s*\/\s*\d+)/)?.[1] || "";
+
   const bathrooms = t.match(/(\d+)\s*bath/)?.[1];
   const balcony = t.match(/(\d+)\s*balcon/)?.[1];
 
@@ -54,21 +69,35 @@ function parseListing(text) {
     text.match(/available\s*from[:\s]*([^\n]+)/i)?.[1]?.trim() || "";
 
   // ===== SOCIETY =====
-  const society =
-    text.match(/\*\s*([^\n*]+?)\s*\*/) ?. [1]?.trim() || "";
+  let society = "";
+
+  // Try text-based detection (capital words)
+  const lines = text.split("\n");
+  for (let line of lines) {
+    line = line.trim();
+    if (
+      /^[A-Z][A-Za-z\s]+$/.test(line) &&
+      !line.toLowerCase().includes("rent") &&
+      line.split(" ").length <= 5
+    ) {
+      society = line;
+      break;
+    }
+  }
 
   // ===== LOCATION =====
   let location =
     text.match(/location[:\s]*([^\n]+)/i)?.[1]?.trim() || "";
 
+  if (!location && society) location = society;
+
   if (!location) {
-    const lines = text.split("\n");
     for (let line of lines) {
       line = line.trim();
       if (
         line &&
         !/\d/.test(line) &&
-        line.split(" ").length <= 5 &&
+        line.split(" ").length <= 4 &&
         !line.toLowerCase().includes("rent")
       ) {
         location = line;
@@ -79,27 +108,33 @@ function parseListing(text) {
 
   if (!location) location = "Unknown";
 
+  // ===== GATED =====
+  let gated = "Non-Gated";
+  if (society) gated = "Gated";
+
   const furnishing =
     t.includes("fully") ? "Fully Furnished" :
     t.includes("semi") ? "Semi Furnished" :
     "Unfurnished";
 
-  const pets = t.includes("allowed") ? "Yes" : "No";
+  const pets =
+    t.includes("pets") && t.includes("not") ? "No" :
+    t.includes("pets") && t.includes("allowed") ? "Yes" : "";
+
   const utility = t.includes("utility") ? "Yes" : "No";
 
-  // ===== COMPLETION RULE =====
   let softCount = 0;
   if (sqft) softCount++;
   if (floor) softCount++;
   if (deposit) softCount++;
-  if (maintenance) softCount++;
+  if (maintenance !== "") softCount++;
   if (availableFrom) softCount++;
   if (bathrooms) softCount++;
 
   if (!(bhk && rent && location && softCount >= 2)) return null;
 
   return {
-    bhk: bhk ? `${bhk} BHK` : "",
+    bhk: `${bhk} BHK`,
     rent,
     maintenance,
     deposit,
@@ -112,6 +147,7 @@ function parseListing(text) {
     pets,
     availableFrom,
     society,
+    gated,
     utility,
     raw: text,
   };
@@ -119,7 +155,7 @@ function parseListing(text) {
 
 // ===== UNIQUE KEY =====
 function generateKey(d) {
-  const str = `${d.bhk}-${d.rent}-${d.sqft}-${d.floor}-${d.deposit}-${d.location}-${d.society}`;
+  const str = `${d.bhk}-${d.rent}-${d.location}-${d.society}`;
   return crypto.createHash("md5").update(str.toLowerCase().replace(/\s/g, "")).digest("hex");
 }
 
@@ -154,7 +190,7 @@ async function pushToSheet(d, sender, messageId) {
         now.toLocaleString(),
         "Online",
         d.location,
-        d.society ? "Gated" : "Non-Gated",
+        d.gated,
         d.society,
         d.bhk,
         d.bathrooms,
@@ -187,17 +223,26 @@ async function pushToSheet(d, sender, messageId) {
   console.log("✅ INSERTED:", key);
 }
 
-// ===== BUFFER HANDLER =====
+// ===== SPLIT MULTI LISTING =====
+function splitListings(text) {
+  return text.split(/(?=\d+\s*bhk)/i);
+}
+
+// ===== PROCESS BUFFER =====
 function processBuffer(sender) {
   const buffer = buffers[sender];
   if (!buffer) return;
 
-  const data = parseListing(buffer.text);
+  const listings = splitListings(buffer.text);
 
-  if (data) {
-    pushToSheet(data, buffer.sender, buffer.messageId);
-    delete buffers[sender];
+  for (let chunk of listings) {
+    const data = parseListing(chunk);
+    if (data) {
+      pushToSheet(data, buffer.sender, buffer.messageId);
+    }
   }
+
+  delete buffers[sender];
 }
 
 // ===== WEBHOOK =====
@@ -211,26 +256,16 @@ app.post("/webhook", async (req, res) => {
 
     if (!message) return res.sendStatus(200);
 
-    console.log("📩", message);
-
     if (!buffers[sender]) {
-      buffers[sender] = { text: "", sender, messageId };
-    }
-
-    // NEW BHK → flush old
-    if (message.toLowerCase().match(/\d+\s*bhk/) && buffers[sender].text) {
-      processBuffer(sender);
       buffers[sender] = { text: "", sender, messageId };
     }
 
     buffers[sender].text += "\n" + message;
 
-    // MAP LINK → force flush
     if (message.includes("maps.app.goo.gl")) {
       processBuffer(sender);
     }
 
-    // TIMEOUT 30 sec
     clearTimeout(buffers[sender].timer);
     buffers[sender].timer = setTimeout(() => {
       processBuffer(sender);
@@ -243,7 +278,6 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
-// ROOT
 app.get("/", (req, res) => {
   res.send("Webhook is live ✅");
 });
