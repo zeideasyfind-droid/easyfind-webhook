@@ -1,10 +1,10 @@
 // ==============================
-// VERSION P7.2
+// VERSION P7.2.1
 // Changes:
-// 1. FIX: WhatsApp image upload (401 issue resolved using buffer upload)
-// 2. FIX: Society parsing ignores "Landmark", "Location"
-// 3. FIX: Furnishing detection (Column L issue resolved)
-// 4. SAFE: No breaking changes to parser flow
+// 1. FIX: Cloudinary upload using STREAM (403 resolved)
+// 2. FIX: Image fetch validation (prevents broken uploads)
+// 3. FIX: Furnishing detection improved (Column L)
+// 4. SAFE: No changes to existing flow or structure
 // ==============================
 
 const express = require("express");
@@ -77,24 +77,28 @@ function parseMoney(text) {
   return val;
 }
 
-// ===== P7.2 FIX: BUFFER BASED CLOUDINARY UPLOAD =====
+// ===== P7.2.1 FIX: STREAM BASED CLOUDINARY UPLOAD =====
 async function uploadBufferToCloudinary(buffer) {
-  try {
-    const base64 = Buffer.from(buffer).toString("base64");
-
-    const result = await cloudinary.uploader.upload(
-      `data:image/jpeg;base64,${base64}`,
-      { folder: "easyfind_properties" }
+  return new Promise((resolve) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: "easyfind_properties",
+        resource_type: "image",
+      },
+      (error, result) => {
+        if (error) {
+          log("CLOUDINARY ERROR", error.message);
+          return resolve("");
+        }
+        resolve(result.secure_url);
+      }
     );
 
-    return result.secure_url;
-  } catch (err) {
-    log("CLOUDINARY ERROR", err.message);
-    return "";
-  }
+    stream.end(Buffer.from(buffer));
+  });
 }
 
-// ===== PARSER (SAFE FIXES ONLY) =====
+// ===== PARSER =====
 function parseListing(text) {
   if (!text) return null;
 
@@ -143,12 +147,7 @@ function parseListing(text) {
   for (let line of lines) {
     if (line.includes("maps.app.goo.gl")) {
       let before = line.split("https")[0].trim();
-
-      // ===== P7.2 FIX: IGNORE GENERIC WORDS =====
-      if (
-        before &&
-        !/landmark|location|map/i.test(before)
-      ) {
+      if (before && !/landmark|location|map/i.test(before)) {
         society = cleanText(before);
       }
     }
@@ -158,7 +157,6 @@ function parseListing(text) {
     for (let i = 0; i < lines.length; i++) {
       if (lines[i].includes("maps.app.goo.gl")) {
         let prev = cleanText((lines[i - 1] || "").trim());
-
         if (!/landmark|location|map/i.test(prev)) {
           society = prev;
         }
@@ -173,11 +171,11 @@ function parseListing(text) {
 
   let gated = /gated/i.test(t) ? "Gated" : "Non-Gated";
 
-  // ===== P7.2 FIX: FURNISHING =====
+  // ===== P7.2.1 FIX: FURNISHING =====
   let furnishing = "";
-  if (/semi\s*furnished/i.test(text)) furnishing = "Semi Furnished";
-  else if (/fully\s*furnished/i.test(text)) furnishing = "Fully Furnished";
-  else if (/unfurnished/i.test(text)) furnishing = "Unfurnished";
+  if (/semi[-\s]?furnished/i.test(text)) furnishing = "Semi Furnished";
+  else if (/fully[-\s]?furnished/i.test(text)) furnishing = "Fully Furnished";
+  else if (/un[-\s]?furnished/i.test(text)) furnishing = "Unfurnished";
 
   let pets = "";
   if (/pets.*not/i.test(text)) pets = "No";
@@ -312,7 +310,6 @@ app.post("/webhook", async (req, res) => {
 
     let imageUrl = "";
 
-    // ===== P7.2 FIX: IMAGE DOWNLOAD WITH AUTH =====
     if (msgObj?.image?.id) {
       try {
         const mediaRes = await fetch(
@@ -326,11 +323,17 @@ app.post("/webhook", async (req, res) => {
 
         const mediaData = await mediaRes.json();
 
-        const imageBuffer = await fetch(mediaData.url, {
+        const imageResponse = await fetch(mediaData.url, {
           headers: {
             Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
           },
-        }).then(res => res.arrayBuffer());
+        });
+
+        if (!imageResponse.ok) {
+          throw new Error("Failed to fetch image");
+        }
+
+        const imageBuffer = await imageResponse.arrayBuffer();
 
         imageUrl = await uploadBufferToCloudinary(imageBuffer);
 
