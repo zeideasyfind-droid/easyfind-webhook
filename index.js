@@ -1,13 +1,12 @@
 // ==============================
-// VERSION P6
+// VERSION P7
 // Changes:
-// 1. FIX: Veg detection (Column N)
-// 2. FIX: Society extraction (same-line + next-line)
-// 3. FIX: Balcony "a balcony" support
-// 4. FIX: Floor parsing (5th / Villa)
-// 5. FIX: Multi-listing support restored (SAFE split)
-// 6. FIX: Onboarding Type parsing (Column B)
-// 7. IMPROVEMENT: Location fallback from society
+// 1. FIX: Furnishing detection fallback (handles missing semi/fully + partial)
+// 2. FIX: Society extraction edge case (*Name:* https)
+// 3. FIX: Veg detection improved (checks clientType also)
+// 4. FIX: Balcony fallback (handles "balcony" without number)
+// 5. IMPROVEMENT: Client type normalization (safe mapping)
+// 6. NO parser rewrite — only safe enhancements
 // ==============================
 
 const express = require("express");
@@ -94,32 +93,35 @@ function parseListing(text) {
   const sqft =
     text.match(/(?:sqft|area)[^\d]*(\d+)/i)?.[1] || "";
 
-  // ===== FLOOR FIX =====
+  // ===== FLOOR (P6 unchanged) =====
   let floor =
     text.match(/(\d+\s*\/\s*\d+)/)?.[1] ||
     text.match(/(\d+)(st|nd|rd|th)/i)?.[1] ||
-    ( /villa/i.test(text) ? "Villa" : "" );
+    (/villa/i.test(text) ? "Villa" : "");
 
   const bathrooms = t.match(/(\d+)\s*bath/)?.[1] || "";
 
-  // ===== BALCONY FIX =====
+  // ===== BALCONY FIX (P7 enhancement) =====
   let balcony = "";
   if (/(\d+)\s*balcon/i.test(text)) {
     balcony = text.match(/(\d+)\s*balcon/i)[1];
   } else if (/a\s*balcon/i.test(text)) {
     balcony = "1";
+  } else if (/balcon/i.test(text)) {
+    balcony = "1"; // P7 fallback
   }
 
   const availableFrom =
     text.match(/available\s*from[:\s]*([^\n]+)/i)?.[1] || "";
 
-  // ===== SOCIETY FIX =====
+  // ===== SOCIETY FIX (P7 enhancement) =====
   let society = "";
   const lines = text.split("\n");
 
   for (let line of lines) {
     if (line.includes("maps.app.goo.gl")) {
-      const before = line.split("https")[0];
+      let before = line.split("https")[0];
+      before = before.replace(/[:]/g, ""); // P7 FIX
       if (before.trim()) {
         society = cleanText(before);
       }
@@ -129,7 +131,7 @@ function parseListing(text) {
   if (!society) {
     for (let i = 0; i < lines.length; i++) {
       if (lines[i].includes("maps.app.goo.gl")) {
-        society = cleanText(lines[i - 1] || "");
+        society = cleanText((lines[i - 1] || "").replace(/[:]/g, ""));
       }
     }
   }
@@ -138,32 +140,46 @@ function parseListing(text) {
   let location =
     cleanText(text.match(/location[:\s]*([^\n]+)/i)?.[1] || "");
 
-  if (!location && society) location = society; // fallback
+  if (!location && society) location = society;
 
   let gated = /gated/i.test(t) ? "Gated" : "Non-Gated";
 
-  // ===== FURNISHING =====
+  // ===== FURNISHING FIX (P7 enhancement) =====
   let furnishing = "";
+
   if (/\bunfurnished\b/.test(t)) furnishing = "Unfurnished";
   else if (/\bfully\b/.test(t)) furnishing = "Fully Furnished";
   else if (/\bsemi\b/.test(t)) furnishing = "Semi Furnished";
+  else if (/\bpartial\b/.test(t)) furnishing = "Semi Furnished"; // P7 FIX
+  else if (/\bfurnished\b/.test(t)) furnishing = "Fully Furnished"; // fallback
 
   // ===== PETS =====
   let pets = "";
   if (/pets.*not/i.test(text)) pets = "No";
   else if (/pets.*allowed/i.test(text)) pets = "Yes";
 
-  // ===== VEG FIX =====
-  let veg = "";
-  if (/vegetarian/i.test(text)) veg = "Veg Only";
-  else veg = "No Restriction";
-
   const utility = /utility/i.test(text) ? "Yes" : "No";
 
-  const clientType =
+  // ===== CLIENT TYPE (P7 normalization) =====
+  let clientType =
     cleanText(text.match(/preferred\s*tenant[:\s]*([^\n]+)/i)?.[1] || "");
 
-  // ===== ONBOARDING TYPE FIX =====
+  const ct = normalize(clientType);
+
+  if (ct.includes("anyone")) clientType = "Open for All";
+  else if (ct.includes("family") && ct.includes("bachelor"))
+    clientType = "Family & Bachelors";
+  else if (ct.includes("family")) clientType = "Family";
+
+  // ===== VEG FIX (P7 enhancement) =====
+  let veg = "";
+  if (/vegetarian/i.test(text) || /vegetarian/i.test(clientType)) {
+    veg = "Veg Only";
+  } else {
+    veg = "No Restriction";
+  }
+
+  // ===== ONBOARDING =====
   let onboarding =
     cleanText(text.match(/onboarding type[:\s]*([^\n]+)/i)?.[1] || "");
 
@@ -190,7 +206,7 @@ function parseListing(text) {
   };
 }
 
-// ===== PROCESS (MULTI LISTING RESTORED) =====
+// ===== PROCESS (UNCHANGED) =====
 async function processBuffer(sender) {
   const buffer = buffers[sender];
   if (!buffer) return;
