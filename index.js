@@ -69,17 +69,20 @@ function parseMoney(text) {
 }
 
 // ===== P7.2.2 FIX: CLOUDINARY UPLOAD =====
+
 async function uploadBufferToCloudinary(buffer) {
   try {
-    const result = await cloudinary.uploader.upload_large(
-      Buffer.from(buffer),
+    const base64 = Buffer.from(buffer).toString("base64");
+
+    const result = await cloudinary.uploader.upload(
+      `data:image/jpeg;base64,${base64}`,
       {
         folder: "easyfind_properties",
-        resource_type: "image",
       }
     );
 
     return result.secure_url;
+
   } catch (err) {
     log("CLOUDINARY ERROR", err.message);
     return "";
