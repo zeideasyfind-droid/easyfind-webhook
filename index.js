@@ -1,8 +1,9 @@
 // ==============================
-// VERSION P7.3.2
+// VERSION P7.3.3
 // Changes:
-// 1. FIX: Added production Google Drive folder ID
-// 2. SAFE: No parser / webhook / sheet / logic changes
+// 1. FIX: Added supportsAllDrives: true for Google Drive shared folder uploads
+// 2. FIX: Prevents "Service Accounts do not have storage quota" error
+// 3. SAFE: No parser / webhook / sheet / logic changes
 // ==============================
 
 const express = require("express");
@@ -33,7 +34,7 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: "v4", auth });
 
-// ===== P7.3 ADD =====
+// ===== GOOGLE DRIVE =====
 const drive = google.drive({ version: "v3", auth });
 
 // ===== P7.3.2 FIX: PRODUCTION FOLDER ID =====
@@ -98,7 +99,7 @@ async function uploadBufferToCloudinary(buffer) {
   }
 }
 
-// ===== P7.3 ADD: GOOGLE DRIVE UPLOAD =====
+// ===== P7.3.3 FIX: GOOGLE DRIVE SHARED DRIVE SUPPORT =====
 async function uploadToDrive(buffer) {
   try {
     const stream = Readable.from(buffer);
@@ -108,10 +109,15 @@ async function uploadToDrive(buffer) {
         name: `property_${Date.now()}.jpg`,
         parents: [DRIVE_FOLDER_ID],
       },
+
+      // ===== P7.3.3 FIX =====
+      supportsAllDrives: true,
+
       media: {
         mimeType: "image/jpeg",
         body: stream,
       },
+
       fields: "id",
     });
 
@@ -120,6 +126,10 @@ async function uploadToDrive(buffer) {
     // Make public
     await drive.permissions.create({
       fileId,
+
+      // ===== P7.3.3 FIX =====
+      supportsAllDrives: true,
+
       requestBody: {
         role: "reader",
         type: "anyone",
@@ -332,7 +342,7 @@ async function pushToSheet(d, sender, messageId, imageUrl = "") {
   log("SUCCESS", key);
 }
 
-// ===== WEBHOOK (ONLY CHANGE: uploadToDrive) =====
+// ===== WEBHOOK =====
 app.post("/webhook", async (req, res) => {
   try {
     const msgObj = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
@@ -370,7 +380,6 @@ app.post("/webhook", async (req, res) => {
 
         const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
 
-        // ===== ONLY LINE CHANGED =====
         imageUrl = await uploadToDrive(imageBuffer);
 
       } catch (err) {
