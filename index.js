@@ -20,7 +20,7 @@ const buffers = {};
 
 // ===== CLEAN TEXT =====
 function cleanText(text) {
-  return text.replace(/\*/g, "").trim();
+  return (text || "").replace(/\*/g, "").trim();
 }
 
 // ===== MONEY =====
@@ -91,7 +91,16 @@ function parseListing(text) {
 
   for (let i = 0; i < lines.length; i++) {
     if (lines[i].includes("maps.app.goo.gl")) {
-      society = cleanText(lines[i - 1] || "");
+      const possible = cleanText(lines[i - 1] || "");
+
+      // avoid junk
+      if (
+        possible &&
+        !possible.toLowerCase().includes("location") &&
+        !possible.toLowerCase().includes("rent")
+      ) {
+        society = possible;
+      }
       break;
     }
   }
@@ -103,11 +112,16 @@ function parseListing(text) {
   // ===== GATED =====
   let gated = society ? "Gated" : "Non-Gated";
 
-  // ===== FURNISHING (FIXED) =====
+  // ===== FURNISHING =====
   let furnishing = "";
-  if (/fully\s*-?\s*furnished/i.test(text)) furnishing = "Fully Furnished";
-  else if (/semi\s*-?\s*furnished/i.test(text)) furnishing = "Semi Furnished";
-  else if (/un\s*furnished/i.test(text)) furnishing = "Unfurnished";
+
+  if (/unfurnished/i.test(text)) {
+    furnishing = "Unfurnished";
+  } else if (/\bfull\b|\bfully\b/i.test(text)) {
+    furnishing = "Fully Furnished";
+  } else if (/semi|partial/i.test(text)) {
+    furnishing = "Semi Furnished";
+  }
 
   // ===== PETS =====
   let pets = "";
@@ -194,7 +208,7 @@ async function pushToSheet(d, sender, messageId) {
     requestBody: {
       values: [[
         now.toLocaleString(),
-        "", // Column B FIXED
+        "",
         d.location,
         d.gated,
         d.society,
