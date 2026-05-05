@@ -1,11 +1,13 @@
 // ==============================
-// VERSION P5
+// VERSION P6
 // Changes:
-// 1. RESTORED full parser from P3 (fixes missing columns issue)
-// 2. FIXED crash: undefined.match (safe parsing everywhere)
-// 3. FIXED buffer overwrite issue (no message mixing)
-// 4. REMOVED over-aggressive splitting (kept stable version)
-// 5. Added inline comments for every fix (Capgemini style)
+// 1. FIX: Veg detection (Column N)
+// 2. FIX: Society extraction (same-line + next-line)
+// 3. FIX: Balcony "a balcony" support
+// 4. FIX: Floor parsing (5th / Villa)
+// 5. FIX: Multi-listing support restored (SAFE split)
+// 6. FIX: Onboarding Type parsing (Column B)
+// 7. IMPROVEMENT: Location fallback from society
 // ==============================
 
 const express = require("express");
@@ -53,7 +55,6 @@ function normalize(text) {
 }
 
 // ===== MONEY =====
-// P5 FIX: prevent crash when text undefined
 function parseMoney(text) {
   if (!text) return "";
 
@@ -70,7 +71,6 @@ function parseMoney(text) {
 }
 
 // ===== PARSER =====
-// P5: RESTORED FULL WORKING PARSER
 function parseListing(text) {
   if (!text) return null;
 
@@ -79,10 +79,7 @@ function parseListing(text) {
   const bhk = t.match(/(\d+(\.\d+)?)\s*bhk/)?.[1];
   const rent = parseMoney(text.match(/rent[^\n]*/i)?.[0] || "");
 
-  if (!bhk || !rent) {
-    log("SKIPPED LISTING", "Missing BHK or Rent");
-    return null;
-  }
+  if (!bhk || !rent) return null;
 
   const maintenanceLine = text.match(/maintenance[^\n]*/i)?.[0] || "";
   const maintenance = /including/i.test(maintenanceLine)
@@ -92,35 +89,56 @@ function parseListing(text) {
   const depositLine =
     text.match(/(deposit|advance|security)[^\n]*/i)?.[0] || "";
 
-  let deposit = parseMoney(depositLine);
+  const deposit = parseMoney(depositLine);
 
   const sqft =
     text.match(/(?:sqft|area)[^\d]*(\d+)/i)?.[1] || "";
 
-  const floor = text.match(/(\d+\s*\/\s*\d+)/)?.[1] || "";
+  // ===== FLOOR FIX =====
+  let floor =
+    text.match(/(\d+\s*\/\s*\d+)/)?.[1] ||
+    text.match(/(\d+)(st|nd|rd|th)/i)?.[1] ||
+    ( /villa/i.test(text) ? "Villa" : "" );
+
   const bathrooms = t.match(/(\d+)\s*bath/)?.[1] || "";
 
+  // ===== BALCONY FIX =====
   let balcony = "";
   if (/(\d+)\s*balcon/i.test(text)) {
     balcony = text.match(/(\d+)\s*balcon/i)[1];
+  } else if (/a\s*balcon/i.test(text)) {
+    balcony = "1";
   }
 
   const availableFrom =
     text.match(/available\s*from[:\s]*([^\n]+)/i)?.[1] || "";
 
-  // ===== SOCIETY =====
+  // ===== SOCIETY FIX =====
   let society = "";
   const lines = text.split("\n");
 
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].includes("maps.app.goo.gl")) {
-      society = cleanText(lines[i - 1] || "");
+  for (let line of lines) {
+    if (line.includes("maps.app.goo.gl")) {
+      const before = line.split("https")[0];
+      if (before.trim()) {
+        society = cleanText(before);
+      }
+    }
+  }
+
+  if (!society) {
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].includes("maps.app.goo.gl")) {
+        society = cleanText(lines[i - 1] || "");
+      }
     }
   }
 
   // ===== LOCATION =====
   let location =
     cleanText(text.match(/location[:\s]*([^\n]+)/i)?.[1] || "");
+
+  if (!location && society) location = society; // fallback
 
   let gated = /gated/i.test(t) ? "Gated" : "Non-Gated";
 
@@ -130,14 +148,24 @@ function parseListing(text) {
   else if (/\bfully\b/.test(t)) furnishing = "Fully Furnished";
   else if (/\bsemi\b/.test(t)) furnishing = "Semi Furnished";
 
+  // ===== PETS =====
   let pets = "";
   if (/pets.*not/i.test(text)) pets = "No";
   else if (/pets.*allowed/i.test(text)) pets = "Yes";
+
+  // ===== VEG FIX =====
+  let veg = "";
+  if (/vegetarian/i.test(text)) veg = "Veg Only";
+  else veg = "No Restriction";
 
   const utility = /utility/i.test(text) ? "Yes" : "No";
 
   const clientType =
     cleanText(text.match(/preferred\s*tenant[:\s]*([^\n]+)/i)?.[1] || "");
+
+  // ===== ONBOARDING TYPE FIX =====
+  let onboarding =
+    cleanText(text.match(/onboarding type[:\s]*([^\n]+)/i)?.[1] || "");
 
   return {
     bhk: `${bhk} BHK`,
@@ -156,24 +184,26 @@ function parseListing(text) {
     gated,
     utility,
     clientType,
+    veg,
+    onboarding,
     raw: text,
   };
 }
 
-// ===== PROCESS =====
-// P5 FIX: single chunk (no over splitting)
+// ===== PROCESS (MULTI LISTING RESTORED) =====
 async function processBuffer(sender) {
   const buffer = buffers[sender];
   if (!buffer) return;
 
-  log("PROCESSING BUFFER", sender);
-
   if (buffer.timer) clearTimeout(buffer.timer);
 
-  const data = parseListing(buffer.text);
+  const listings = buffer.text.split(/(?=\d+(\.\d+)?\s*bhk)/i);
 
-  if (data) {
-    await pushToSheet(data, sender, buffer.messageId);
+  for (let chunk of listings) {
+    const data = parseListing(chunk);
+    if (data) {
+      await pushToSheet(data, sender, buffer.messageId);
+    }
   }
 
   delete buffers[sender];
@@ -195,7 +225,7 @@ async function pushToSheet(d, sender, messageId) {
     requestBody: {
       values: [[
         now.toLocaleString(),
-        "",
+        d.onboarding || "",
         d.location,
         d.gated,
         d.society,
@@ -207,7 +237,7 @@ async function pushToSheet(d, sender, messageId) {
         d.floor,
         d.furnishing,
         d.clientType,
-        "",
+        d.veg,
         d.pets,
         d.rent,
         d.maintenance,
@@ -241,9 +271,6 @@ app.post("/webhook", async (req, res) => {
 
     if (!message || !sender) return res.sendStatus(200);
 
-    log("NEW MESSAGE", { sender });
-
-    // P5 FIX: overwrite buffer
     buffers[sender] = {
       text: message,
       sender,
