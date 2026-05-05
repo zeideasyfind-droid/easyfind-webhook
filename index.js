@@ -1,10 +1,10 @@
 // ==============================
-// VERSION P1
-// Fixes:
-// 1. Timer crash fix
-// 2. Safe buffer handling
-// 3. Structured logs
-// 4. Root route added
+// VERSION P2
+// Changes:
+// 1. Fixed listing split logic (BHK based)
+// 2. Prevent double buffer processing (timer cleared before process)
+// 3. Await pushToSheet (critical fix)
+// 4. Added parsing debug logs
 // ==============================
 
 const express = require("express");
@@ -28,10 +28,8 @@ const sheets = google.sheets({ version: "v4", auth });
 const buffers = {};
 
 // ===== LOGGER =====
-// P1: Structured logs
 function log(title, data = "") {
   console.log(`\n========== ${title} ==========`);
-
   if (typeof data === "object") {
     console.log(JSON.stringify(data, null, 2));
   } else {
@@ -64,6 +62,11 @@ function parseListing(text) {
 
   const bhk = t.match(/(\d+)\s*bhk/)?.[1];
   const rent = parseMoney(text.match(/rent[^\n]*/i)?.[0] || "");
+
+  if (!bhk || !rent) {
+    log("SKIPPED LISTING", "Missing BHK or Rent");
+    return null;
+  }
 
   let maintenanceLine = text.match(/maintenance[^\n]*/i)?.[0] || "";
   let maintenance = /including|included|inclusive/i.test(maintenanceLine)
@@ -98,7 +101,6 @@ function parseListing(text) {
   const availableFrom =
     text.match(/available\s*from[:\s]*([^\n]+)/i)?.[1]?.trim() || "";
 
-  // SOCIETY
   let society = "";
   const lines = text.split("\n");
 
@@ -146,16 +148,6 @@ function parseListing(text) {
   else if (/non[-\s]?veg/i.test(text)) veg = "Non Veg";
   else veg = "No Restriction";
 
-  let softCount = 0;
-  if (sqft) softCount++;
-  if (floor) softCount++;
-  if (deposit) softCount++;
-  if (maintenance !== "") softCount++;
-  if (availableFrom) softCount++;
-  if (bathrooms) softCount++;
-
-  if (!(bhk && rent && softCount >= 2)) return null;
-
   return {
     bhk: `${bhk} BHK`,
     rent,
@@ -179,18 +171,24 @@ function parseListing(text) {
 }
 
 // ===== PROCESS =====
-function processBuffer(sender) {
+async function processBuffer(sender) {
   const buffer = buffers[sender];
   if (!buffer) return;
 
   log("PROCESSING BUFFER", sender);
 
-  const listings = buffer.text.split(/\n\s*\n/).filter(x => /bhk/i.test(x));
+  // P2 FIX: clear timer BEFORE processing
+  if (buffer.timer) clearTimeout(buffer.timer);
+
+  // P2 FIX: better split
+  const listings = buffer.text.split(/(?=\d+\s*bhk)/i);
+
+  log("LISTINGS FOUND", listings.length);
 
   for (let chunk of listings) {
     const data = parseListing(chunk);
     if (data) {
-      pushToSheet(data, sender, buffer.messageId);
+      await pushToSheet(data, sender, buffer.messageId); // P2 FIX
     }
   }
 
@@ -265,7 +263,7 @@ app.post("/webhook", async (req, res) => {
 
     if (!message || !sender) return res.sendStatus(200);
 
-    log("NEW MESSAGE", { sender, message });
+    log("NEW MESSAGE", { sender });
 
     if (!buffers[sender]) {
       buffers[sender] = { text: "", sender, messageId, timer: null };
@@ -282,7 +280,7 @@ app.post("/webhook", async (req, res) => {
     }, 30000);
 
     if (message.includes("maps.app.goo.gl")) {
-      processBuffer(sender);
+      await processBuffer(sender); // P2 FIX
     }
 
   } catch (err) {
@@ -292,7 +290,7 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
-// ROOT ROUTE FIX
+// ROOT
 app.get("/", (req, res) => {
   res.send("Webhook is live ✅");
 });
