@@ -1,18 +1,16 @@
 // ==============================
-// VERSION P7.3.3
+// VERSION P7.4
 // Changes:
-// 1. FIX: Added supportsAllDrives: true for Google Drive shared folder uploads
-// 2. FIX: Prevents "Service Accounts do not have storage quota" error
-// 3. SAFE: No parser / webhook / sheet / logic changes
+// 1. REMOVE: Google Drive upload completely
+// 2. ADD: ImgBB image upload integration
+// 3. FIX: Removes Google Drive quota/shared drive dependency
+// 4. SAFE: No parser / webhook / sheet / logic changes
 // ==============================
 
 const express = require("express");
 const { google } = require("googleapis");
 const crypto = require("crypto");
 const fetch = require("node-fetch");
-
-// ===== P7.3 ADD =====
-const { Readable } = require("stream");
 
 const cloudinary = require("cloudinary").v2;
 
@@ -27,18 +25,11 @@ const SHEET_NAME = "Live Tracking";
 const auth = new google.auth.GoogleAuth({
   credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
   scopes: [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
+    "https://www.googleapis.com/auth/spreadsheets"
   ],
 });
 
 const sheets = google.sheets({ version: "v4", auth });
-
-// ===== GOOGLE DRIVE =====
-const drive = google.drive({ version: "v3", auth });
-
-// ===== P7.3.2 FIX: PRODUCTION FOLDER ID =====
-const DRIVE_FOLDER_ID = "1TGVviz3BKuWoqX5xPwufEwwqjIjfTZNg";
 
 const buffers = {};
 
@@ -99,47 +90,30 @@ async function uploadBufferToCloudinary(buffer) {
   }
 }
 
-// ===== P7.3.3 FIX: GOOGLE DRIVE SHARED DRIVE SUPPORT =====
-async function uploadToDrive(buffer) {
+// ===== P7.4 ADD: IMGBB UPLOAD =====
+async function uploadToImgBB(buffer) {
   try {
-    const stream = Readable.from(buffer);
+    const base64 = buffer.toString("base64");
 
-    const res = await drive.files.create({
-      requestBody: {
-        name: `property_${Date.now()}.jpg`,
-        parents: [DRIVE_FOLDER_ID],
-      },
+    const formData = new URLSearchParams();
+    formData.append("key", process.env.IMGBB_API_KEY);
+    formData.append("image", base64);
 
-      // ===== P7.3.3 FIX =====
-      supportsAllDrives: true,
-
-      media: {
-        mimeType: "image/jpeg",
-        body: stream,
-      },
-
-      fields: "id",
+    const response = await fetch("https://api.imgbb.com/1/upload", {
+      method: "POST",
+      body: formData,
     });
 
-    const fileId = res.data.id;
+    const result = await response.json();
 
-    // Make public
-    await drive.permissions.create({
-      fileId,
+    if (!result.success) {
+      throw new Error(result?.error?.message || "ImgBB upload failed");
+    }
 
-      // ===== P7.3.3 FIX =====
-      supportsAllDrives: true,
-
-      requestBody: {
-        role: "reader",
-        type: "anyone",
-      },
-    });
-
-    return `https://drive.google.com/uc?id=${fileId}`;
+    return result.data.url;
 
   } catch (err) {
-    log("DRIVE ERROR", err.message);
+    log("IMGBB ERROR", err.message);
     return "";
   }
 }
@@ -380,7 +354,8 @@ app.post("/webhook", async (req, res) => {
 
         const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
 
-        imageUrl = await uploadToDrive(imageBuffer);
+        // ===== P7.4 CHANGE =====
+        imageUrl = await uploadToImgBB(imageBuffer);
 
       } catch (err) {
         log("IMAGE ERROR", err.message);
