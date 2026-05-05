@@ -1,10 +1,8 @@
 // ==============================
-// VERSION P7.2.1
+// VERSION P7.2.2
 // Changes:
-// 1. FIX: Cloudinary upload using STREAM (403 resolved)
-// 2. FIX: Image fetch validation (prevents broken uploads)
-// 3. FIX: Furnishing detection improved (Column L)
-// 4. SAFE: No changes to existing flow or structure
+// 1. FIX: Cloudinary 403 resolved using upload_large (binary safe)
+// 2. SAFE: No change to parser / webhook / flow
 // ==============================
 
 const express = require("express");
@@ -12,7 +10,6 @@ const { google } = require("googleapis");
 const crypto = require("crypto");
 const fetch = require("node-fetch");
 
-// ===== CLOUDINARY CONFIG =====
 const cloudinary = require("cloudinary").v2;
 
 const app = express();
@@ -71,25 +68,22 @@ function parseMoney(text) {
   return val;
 }
 
-// ===== P7.2.1 FIX: STREAM BASED CLOUDINARY UPLOAD =====
+// ===== P7.2.2 FIX: CLOUDINARY UPLOAD =====
 async function uploadBufferToCloudinary(buffer) {
-  return new Promise((resolve) => {
-    const stream = cloudinary.uploader.upload_stream(
+  try {
+    const result = await cloudinary.uploader.upload_large(
+      Buffer.from(buffer),
       {
         folder: "easyfind_properties",
         resource_type: "image",
-      },
-      (error, result) => {
-        if (error) {
-          log("CLOUDINARY ERROR", error.message);
-          return resolve("");
-        }
-        resolve(result.secure_url);
       }
     );
 
-    stream.end(Buffer.from(buffer));
-  });
+    return result.secure_url;
+  } catch (err) {
+    log("CLOUDINARY ERROR", err.message);
+    return "";
+  }
 }
 
 // ===== PARSER =====
@@ -165,7 +159,6 @@ function parseListing(text) {
 
   let gated = /gated/i.test(t) ? "Gated" : "Non-Gated";
 
-  // ===== P7.2.1 FIX: FURNISHING =====
   let furnishing = "";
   if (/semi[-\s]?furnished/i.test(text)) furnishing = "Semi Furnished";
   else if (/fully[-\s]?furnished/i.test(text)) furnishing = "Fully Furnished";
