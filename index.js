@@ -1,10 +1,10 @@
 // ==============================
-// VERSION P2
+// VERSION P3
 // Changes:
-// 1. Fixed listing split logic (BHK based)
-// 2. Prevent double buffer processing (timer cleared before process)
-// 3. Await pushToSheet (critical fix)
-// 4. Added parsing debug logs
+// 1. FIXED furnishing detection (handles semi-furnished, semi furnished, fully, etc)
+// 2. Supports decimal BHK (2.5 BHK)
+// 3. Normalized text for better parsing
+// 4. More robust production-safe parsing
 // ==============================
 
 const express = require("express");
@@ -39,7 +39,18 @@ function log(title, data = "") {
 
 // ===== CLEAN TEXT =====
 function cleanText(text) {
-  return (text || "").replace(/\*/g, "").replace(/[:]/g, "").trim();
+  return (text || "")
+    .replace(/\*/g, "")
+    .replace(/[:]/g, "")
+    .trim();
+}
+
+// ===== NORMALIZE =====
+function normalize(text) {
+  return (text || "")
+    .toLowerCase()
+    .replace(/-/g, " ")   // semi-furnished → semi furnished
+    .replace(/\s+/g, " ");
 }
 
 // ===== MONEY =====
@@ -58,9 +69,11 @@ function parseMoney(text) {
 
 // ===== PARSER =====
 function parseListing(text) {
-  const t = text.toLowerCase();
+  const t = normalize(text);
 
-  const bhk = t.match(/(\d+)\s*bhk/)?.[1];
+  // ✅ P3 FIX: supports 2.5 BHK
+  const bhk = t.match(/(\d+(\.\d+)?)\s*bhk/)?.[1];
+
   const rent = parseMoney(text.match(/rent[^\n]*/i)?.[0] || "");
 
   if (!bhk || !rent) {
@@ -101,6 +114,7 @@ function parseListing(text) {
   const availableFrom =
     text.match(/available\s*from[:\s]*([^\n]+)/i)?.[1]?.trim() || "";
 
+  // ===== SOCIETY =====
   let society = "";
   const lines = text.split("\n");
 
@@ -126,13 +140,18 @@ function parseListing(text) {
 
   if (!location && society) location = society;
 
-  let gated = /gated/i.test(text) ? "Gated" : "Non-Gated";
+  let gated = /gated/i.test(t) ? "Gated" : "Non-Gated";
 
+  // ===== ⭐ P3 FIX: BULLETPROOF FURNISHING =====
   let furnishing = "";
-  if (t.includes("unfurnished")) furnishing = "Unfurnished";
-  else if (t.includes("fully")) furnishing = "Fully Furnished";
-  else if (t.includes("semi") || t.includes("partial"))
+
+  if (/\bunfurnished\b/.test(t)) {
+    furnishing = "Unfurnished";
+  } else if (/\bfully\b/.test(t)) {
+    furnishing = "Fully Furnished";
+  } else if (/\bsemi\b|\bpartial\b/.test(t)) {
     furnishing = "Semi Furnished";
+  }
 
   let pets = "";
   if (/pets.*not/i.test(text)) pets = "No";
@@ -177,18 +196,16 @@ async function processBuffer(sender) {
 
   log("PROCESSING BUFFER", sender);
 
-  // P2 FIX: clear timer BEFORE processing
   if (buffer.timer) clearTimeout(buffer.timer);
 
-  // P2 FIX: better split
-  const listings = buffer.text.split(/(?=\d+\s*bhk)/i);
+  const listings = buffer.text.split(/(?=\d+(\.\d+)?\s*bhk)/i);
 
   log("LISTINGS FOUND", listings.length);
 
   for (let chunk of listings) {
     const data = parseListing(chunk);
     if (data) {
-      await pushToSheet(data, sender, buffer.messageId); // P2 FIX
+      await pushToSheet(data, sender, buffer.messageId);
     }
   }
 
@@ -202,11 +219,7 @@ async function pushToSheet(d, sender, messageId) {
     .update(`${d.bhk}-${d.rent}-${d.location}-${d.society}`.toLowerCase())
     .digest("hex");
 
-  log("INSERTING", {
-    bhk: d.bhk,
-    location: d.location,
-    rent: d.rent,
-  });
+  log("INSERTING", d);
 
   const now = new Date();
 
@@ -280,7 +293,7 @@ app.post("/webhook", async (req, res) => {
     }, 30000);
 
     if (message.includes("maps.app.goo.gl")) {
-      await processBuffer(sender); // P2 FIX
+      await processBuffer(sender);
     }
 
   } catch (err) {
@@ -290,7 +303,6 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
-// ROOT
 app.get("/", (req, res) => {
   res.send("Webhook is live ✅");
 });
