@@ -1,17 +1,18 @@
 // ==============================
-// VERSION P7.1
+// VERSION P7.2
 // Changes:
-// 1. ADD: Cloudinary image upload support (SAFE)
-// 2. ADD: Image detection in webhook (non-intrusive)
-// 3. ADD: Image URL passed to sheet (new column AD)
-// 4. NO changes to parser / existing logic
+// 1. FIX: WhatsApp image upload (401 issue resolved using buffer upload)
+// 2. FIX: Society parsing ignores "Landmark", "Location"
+// 3. FIX: Furnishing detection (Column L issue resolved)
+// 4. SAFE: No breaking changes to parser flow
 // ==============================
 
 const express = require("express");
 const { google } = require("googleapis");
 const crypto = require("crypto");
+const fetch = require("node-fetch");
 
-// ===== P7 ADD: CLOUDINARY CONFIG (SAFE - NO LOGIC CHANGE) =====
+// ===== CLOUDINARY CONFIG =====
 const cloudinary = require("cloudinary").v2;
 
 cloudinary.config({
@@ -76,12 +77,16 @@ function parseMoney(text) {
   return val;
 }
 
-// ===== P7.1 ADD: CLOUDINARY UPLOAD FUNCTION (SAFE) =====
-async function uploadToCloudinary(url) {
+// ===== P7.2 FIX: BUFFER BASED CLOUDINARY UPLOAD =====
+async function uploadBufferToCloudinary(buffer) {
   try {
-    const result = await cloudinary.uploader.upload(url, {
-      folder: "easyfind_properties",
-    });
+    const base64 = Buffer.from(buffer).toString("base64");
+
+    const result = await cloudinary.uploader.upload(
+      `data:image/jpeg;base64,${base64}`,
+      { folder: "easyfind_properties" }
+    );
+
     return result.secure_url;
   } catch (err) {
     log("CLOUDINARY ERROR", err.message);
@@ -89,7 +94,7 @@ async function uploadToCloudinary(url) {
   }
 }
 
-// ===== PARSER (UNCHANGED) =====
+// ===== PARSER (SAFE FIXES ONLY) =====
 function parseListing(text) {
   if (!text) return null;
 
@@ -137,9 +142,13 @@ function parseListing(text) {
 
   for (let line of lines) {
     if (line.includes("maps.app.goo.gl")) {
-      let before = line.split("https")[0];
-      before = before.replace(/[:]/g, "");
-      if (before.trim()) {
+      let before = line.split("https")[0].trim();
+
+      // ===== P7.2 FIX: IGNORE GENERIC WORDS =====
+      if (
+        before &&
+        !/landmark|location|map/i.test(before)
+      ) {
         society = cleanText(before);
       }
     }
@@ -148,7 +157,11 @@ function parseListing(text) {
   if (!society) {
     for (let i = 0; i < lines.length; i++) {
       if (lines[i].includes("maps.app.goo.gl")) {
-        society = cleanText((lines[i - 1] || "").replace(/[:]/g, ""));
+        let prev = cleanText((lines[i - 1] || "").trim());
+
+        if (!/landmark|location|map/i.test(prev)) {
+          society = prev;
+        }
       }
     }
   }
@@ -160,12 +173,11 @@ function parseListing(text) {
 
   let gated = /gated/i.test(t) ? "Gated" : "Non-Gated";
 
+  // ===== P7.2 FIX: FURNISHING =====
   let furnishing = "";
-  if (/\bunfurnished\b/.test(t)) furnishing = "Unfurnished";
-  else if (/\bfully\b/.test(t)) furnishing = "Fully Furnished";
-  else if (/\bsemi\b/.test(t)) furnishing = "Semi Furnished";
-  else if (/\bpartial\b/.test(t)) furnishing = "Semi Furnished";
-  else if (/\bfurnished\b/.test(t)) furnishing = "Fully Furnished";
+  if (/semi\s*furnished/i.test(text)) furnishing = "Semi Furnished";
+  else if (/fully\s*furnished/i.test(text)) furnishing = "Fully Furnished";
+  else if (/unfurnished/i.test(text)) furnishing = "Unfurnished";
 
   let pets = "";
   if (/pets.*not/i.test(text)) pets = "No";
@@ -216,7 +228,7 @@ function parseListing(text) {
   };
 }
 
-// ===== PROCESS (UNCHANGED LOGIC, ADD IMAGE PASS) =====
+// ===== PROCESS =====
 async function processBuffer(sender) {
   const buffer = buffers[sender];
   if (!buffer) return;
@@ -235,7 +247,7 @@ async function processBuffer(sender) {
   delete buffers[sender];
 }
 
-// ===== PUSH (ONLY ADD IMAGE COLUMN) =====
+// ===== PUSH =====
 async function pushToSheet(d, sender, messageId, imageUrl = "") {
   const key = crypto
     .createHash("md5")
@@ -279,7 +291,7 @@ async function pushToSheet(d, sender, messageId, imageUrl = "") {
         d.raw,
         now.toISOString(),
         key,
-        imageUrl // ===== P7.1 ADD (COLUMN AD) =====
+        imageUrl
       ]]
     }
   });
@@ -287,7 +299,7 @@ async function pushToSheet(d, sender, messageId, imageUrl = "") {
   log("SUCCESS", key);
 }
 
-// ===== WEBHOOK (SAFE IMAGE ADD) =====
+// ===== WEBHOOK =====
 app.post("/webhook", async (req, res) => {
   try {
     const msgObj = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
@@ -300,7 +312,7 @@ app.post("/webhook", async (req, res) => {
 
     let imageUrl = "";
 
-    // ===== P7.1 ADD: IMAGE HANDLING =====
+    // ===== P7.2 FIX: IMAGE DOWNLOAD WITH AUTH =====
     if (msgObj?.image?.id) {
       try {
         const mediaRes = await fetch(
@@ -313,9 +325,15 @@ app.post("/webhook", async (req, res) => {
         );
 
         const mediaData = await mediaRes.json();
-        const mediaUrl = mediaData.url;
 
-        imageUrl = await uploadToCloudinary(mediaUrl);
+        const imageBuffer = await fetch(mediaData.url, {
+          headers: {
+            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          },
+        }).then(res => res.arrayBuffer());
+
+        imageUrl = await uploadBufferToCloudinary(imageBuffer);
+
       } catch (err) {
         log("IMAGE ERROR", err.message);
       }
@@ -325,7 +343,7 @@ app.post("/webhook", async (req, res) => {
       text: message,
       sender,
       messageId,
-      imageUrl, // ===== P7.1 ADD =====
+      imageUrl,
       timer: null
     };
 
