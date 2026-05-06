@@ -1,10 +1,10 @@
 // ==============================
-// VERSION P7.4
+// VERSION P7.5
 // Changes:
-// 1. REMOVE: Google Drive upload completely
-// 2. ADD: ImgBB image upload integration
-// 3. FIX: Removes Google Drive quota/shared drive dependency
-// 4. SAFE: No parser / webhook / sheet / logic changes
+// 1. ADD: Internal WhatsApp search bot mode
+// 2. ADD: WhatsApp reply function
+// 3. ADD: "search:" trigger handling
+// 4. SAFE: Existing inventory automation untouched
 // ==============================
 
 const express = require("express");
@@ -115,6 +115,34 @@ async function uploadToImgBB(buffer) {
   } catch (err) {
     log("IMGBB ERROR", err.message);
     return "";
+  }
+}
+
+// ===== P7.5 ADD: WHATSAPP SEND MESSAGE FUNCTION =====
+async function sendWhatsAppMessage(to, message) {
+  try {
+    await fetch(
+      `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to,
+          text: {
+            body: message,
+          },
+        }),
+      }
+    );
+
+    log("WHATSAPP REPLY SENT", to);
+
+  } catch (err) {
+    log("WHATSAPP SEND ERROR", err.message);
   }
 }
 
@@ -326,6 +354,18 @@ app.post("/webhook", async (req, res) => {
     const messageId = msgObj?.id;
 
     if (!sender) return res.sendStatus(200);
+
+    // ===== P7.5 ADD: SEARCH BOT MODE =====
+    if (message.toLowerCase().startsWith("search:")) {
+
+      // ===== P7.5 TEST RESPONSE =====
+      await sendWhatsAppMessage(
+        sender,
+        "Search bot working ✅"
+      );
+
+      return res.sendStatus(200);
+    }
 
     let imageUrl = "";
 
